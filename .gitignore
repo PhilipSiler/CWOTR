@@ -1,0 +1,37 @@
+# The repository holds the engine's source, tests, tools and run scripts.
+# Everything below is left out: private data, other people's code, copyrighted text, and large generated files.
+
+# --- private: raw human game logs (chat, player names, game passwords) and everything decoded from them
+/data/
+
+# --- copyrighted rules text
+/docs/
+
+# --- builds
+/bin/
+*.dSYM/
+*.o
+/proto/bridge
+/proto/bridge_check
+
+# --- training output: keep only the scripts and the one-line-per-result log
+/runs/*
+!/runs/*.sh
+!/runs/training-log.txt
+
+# --- protocol work: keep the source (bridge.c, *.py, Makefile); leave out games, players, the AlphaWOTR copy, downloaded packages
+/proto/games/
+/proto/players/
+/proto/alpha2-copy/
+/proto/pydeps/
+
+# --- tools: keep our scripts; leave out installed packages
+/tools/venv/
+node_modules/
+__pycache__/
+*.pyc
+
+# --- never commit secrets or machine clutter
+.env
+*.token
+.DS_Store
