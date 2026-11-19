@@ -10,9 +10,11 @@
 #   ROUNDS (40)  rounds per stage      SHARE (0.7)  share of training games that start from a board
 #   TEACH (off)  TEACH=<k>: stages up to k also let rollouts make and teach a tenth of Shadow's decisions (off by default:
 #                the recipe is tested plain first - no reward changes, no rollout teaching)
+#   BOARDS (data/ladder2022/back)  folder with b0.txt, b1.txt, ...: boards k turns before the end (back_conq: only from
+#                games the human Shadow won by conquest)      TESTN (600)  test games per pairing after each stage
 #   FROM (shadow_aw6 + fp_aw7)  the players to start from: FROM_SH, FROM_FP
 cd /Users/philipsiler/Code/WOTR-RL/CWOTR
-n=$1; k0=$2; k1=$3; shift 3; d=runs/$n; B=data/ladder2022/back
+n=$1; k0=$2; k1=$3; shift 3; d=runs/$n; B=${BOARDS:-data/ladder2022/back}; N=${TESTN:-600}
 SHF=${FROM_SH:-runs/keep/shadow_aw6}; FPF=${FROM_FP:-runs/keep/fp_aw7}
 if [ ! -d $d ]; then
   mkdir $d || exit 1
@@ -46,12 +48,12 @@ E
   {
     echo "== after stage $k ($(grep -c '^it ' $d/train$k.log) rounds, $(grep '^it ' $d/train$k.log | tail -1 | cut -d' ' -f3-4) a round)"
     echo " Shadow of the sweep against fp_aw7:"
-    WOTR_W=12:0,18:0 WOTR_NUDGE=0.3 WOTR_DEEP_SH=3,4,1,6 WOTR_HUMAN_SH=0.1 WOTR_HUMAN_FP=0.1 ./bin/wotr_t eval runs/keep/fp_aw7 $d/s25 600 9 2>&1 | grep -E "^FP=|average turns to conclusion|Gondor falls" | cut -c1-290
+    WOTR_W=12:0,18:0 WOTR_NUDGE=0.3 WOTR_DEEP_SH=3,4,1,6 WOTR_HUMAN_SH=0.1 WOTR_HUMAN_FP=0.1 ./bin/wotr_t eval runs/keep/fp_aw7 $d/s25 $N 9 2>&1 | grep -E "^FP=|average turns to conclusion|Gondor falls" | cut -c1-290
     echo " Free Peoples of the sweep against shadow_aw6:"
-    WOTR_W=12:0,18:0 WOTR_NUDGE=0.3 WOTR_DEEP_SH=3,4,1,6 WOTR_HUMAN_SH=0.1 WOTR_HUMAN_FP=0.1 ./bin/wotr_t eval $d/latest runs/keep/shadow_aw6 600 9 2>&1 | grep -E "^FP=|average turns to conclusion|Gondor falls" | cut -c1-290
+    WOTR_W=12:0,18:0 WOTR_NUDGE=0.3 WOTR_DEEP_SH=3,4,1,6 WOTR_HUMAN_SH=0.1 WOTR_HUMAN_FP=0.1 ./bin/wotr_t eval $d/latest runs/keep/shadow_aw6 $N 9 2>&1 | grep -E "^FP=|average turns to conclusion|Gondor falls" | cut -c1-290
     echo " the same two pairings started from this stage's boards (the base pair from these boards: see the log):"
-    WOTR_STARTS=$d/boards.txt WOTR_W=12:0,18:0 WOTR_NUDGE=0.3 WOTR_DEEP_SH=3,4,1,6 WOTR_HUMAN_SH=0.1 WOTR_HUMAN_FP=0.1 ./bin/wotr_t eval runs/keep/fp_aw7 $d/s25 600 9 2>&1 | grep -E "^FP=" | cut -c1-200
-    WOTR_STARTS=$d/boards.txt WOTR_W=12:0,18:0 WOTR_NUDGE=0.3 WOTR_DEEP_SH=3,4,1,6 WOTR_HUMAN_SH=0.1 WOTR_HUMAN_FP=0.1 ./bin/wotr_t eval $d/latest runs/keep/shadow_aw6 600 9 2>&1 | grep -E "^FP=" | cut -c1-200
+    WOTR_STARTS=$d/boards.txt WOTR_W=12:0,18:0 WOTR_NUDGE=0.3 WOTR_DEEP_SH=3,4,1,6 WOTR_HUMAN_SH=0.1 WOTR_HUMAN_FP=0.1 ./bin/wotr_t eval runs/keep/fp_aw7 $d/s25 $N 9 2>&1 | grep -E "^FP=" | cut -c1-200
+    WOTR_STARTS=$d/boards.txt WOTR_W=12:0,18:0 WOTR_NUDGE=0.3 WOTR_DEEP_SH=3,4,1,6 WOTR_HUMAN_SH=0.1 WOTR_HUMAN_FP=0.1 ./bin/wotr_t eval $d/latest runs/keep/shadow_aw6 $N 9 2>&1 | grep -E "^FP=" | cut -c1-200
   } >> $d/sweep.out 2>&1
   k=$((k + 1))
 done
