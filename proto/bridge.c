@@ -948,6 +948,9 @@ static void decision_dump(const char *file, const State *s, Move m, uint64_t see
     }
 }
 
+/* WOTR_AGREE=1 (a test of the bot mode): at every question answered by the outside bot, what would our own player have
+   chosen in the true position? Counted per engine question; our player asked twice shows how much it varies by itself. */
+static Agent *g_agx; static long g_agree[ND][3];
 /* One game. Returns 0, or 1 if a check failed on the way. */
 static int play_game(Ref *R, Agent *ag, uint64_t seed, int verbose) {
     static Leaf *L; static char **text; static uint8_t *alive;
@@ -1001,6 +1004,12 @@ static int play_game(Ref *R, Agent *ag, uint64_t seed, int verbose) {
             if (pick >= nl) { fprintf(stderr, "ERROR: no move left after the answers\n"); return 1; }
             (void)left;
             pref = L[pick].die; first = L[pick].mv[0];
+            if (g_agx && nl > 1) {
+                Move d[2]; float bv; int n;
+                for (int q = 0; q < 2; q++) { State c = *s; wotr_prune = 1; wotr_determinize(&c, side, R->rng += 0x1234567); d[q] = agent_choose(g_agx, &c, &bv, &n); if (d[q].type == M_NAZ_MOVE && d[q].d == 0 && d[q].c > 1) d[q].c = 1; }
+                wotr_prune = 0;
+                g_agree[s->dkind][0]++; g_agree[s->dkind][1] += !memcmp(&d[0], &first, sizeof first); g_agree[s->dkind][2] += !memcmp(&d[0], &d[1], sizeof first);
+            }
             wotr_move_str(s, first, buf, sizeof buf);
             if (verbose) fprintf(stderr, "%s* %s\n", side ? "  SH" : "FP  ", buf);
             for (int k = 0; k < L[pick].nmv; k++) {
@@ -1115,6 +1124,8 @@ static int cmd_referee(int argc, char **argv, int mock) {
     R.next_id = 2;
     fprintf(stderr, "game %s: %s plays %s, our player (%s) plays %s\n", R.game, botname, R.ext == FP ? "the Free Peoples" : "the Shadow", argv[2], R.ext == FP ? "the Shadow" : "the Free Peoples");
     roll_setup(&ag, p, !R.ext);
+    static Agent agx;
+    if (getenv("WOTR_AGREE")) { agx = ag; agx.rng = seed * 131 + 9; if (R.ext == SH) { agx.depth = 3; agx.width = 4; agx.replies = 1; agx.narrow = 6; agx.taper = 0; } else agx.depth = 0; g_agx = &agx; }
     if (ag.roll_ms > 0 || ag.roll_n > 0) fprintf(stderr, "rollouts on for our side: %.0f ms, at most %d rollouts, shortlist %d\n", ag.roll_ms, ag.roll_n, ag.roll_k);
     int bad = play_game(&R, &ag, seed, 1);
     roll_report();
@@ -1123,6 +1134,7 @@ static int cmd_referee(int argc, char **argv, int mock) {
     else snprintf(msg, sizeof msg, "{\"type\":\"game_over\",\"game\":\"%s\",\"winner\":\"%s\",\"how\":\"%s\",\"turn\":%d}", R.game, SIDE_KEY[s->winner - 1], how_key(s), s->turn);
     send_line(msg);
     send_line("{\"type\":\"quit\"}");
+    if (g_agx) for (int k = 0; k < ND; k++) if (g_agree[k][0]) fprintf(stderr, "AGREE %s asked=%ld bot_same=%ld self_same=%ld\n", wotr_dkind_name(k), g_agree[k][0], g_agree[k][1], g_agree[k][2]);
     fprintf(stderr, "RESULT game=%s outside_bot=%s outside_side=%s winner=%s how=%s turn=%d questions=%ld illegal_answers=%ld failed_checks=%d fp_vp=%d sh_vp=%d corruption=%d our_ms_avg=%.0f our_ms_max=%.0f bot_ms_avg=%.0f bot_ms_max=%.0f\n",
             R.game, botname, SIDE_KEY[R.ext], s->win_type == WIN_NONE ? "none" : SIDE_KEY[s->winner - 1], how_key(s), s->turn, R.asked, R.illegal, bad, wotr_vp(s, FP), wotr_vp(s, SH), s->corruption,
             R.ms_n[0] ? R.ms_sum[0] / R.ms_n[0] : 0, R.ms_max[0], R.ms_n[1] ? R.ms_sum[1] / R.ms_n[1] : 0, R.ms_max[1]);
@@ -1287,6 +1299,596 @@ static int cmd_replay(int argc, char **argv) {
     return 0;
 }
 
+
+/* ================= playing as a bot: the other end of the protocol (2026-11-19) =================
+ * bridge bot <player>: our player as a protocol bot on stdin/stdout. A referee (any rules engine) holds the game; we
+ * only ever answer with one of the options it lists, so an illegal move is impossible.
+ *  - At an ACTION question the position is rebuilt from the view (what our side cannot see is dealt at random), our
+ *    player chooses a whole move with its own engine, and the move is given as the small answers the protocol asks for.
+ *  - The questions that continue our own action (the next Army, the next recruit, Companions, Nazgul) are answered
+ *    from the position we then hold, as long as nothing random has happened in between.
+ *  - Everything else (battles, the Hunt, the Fellowship phase, cards' questions) is answered by short written rules
+ *    for now: the engine cannot yet be set down in the middle of a battle from a view. */
+typedef struct {
+    Ref R;                      /* R.s: our picture of the position; R.dice: the numbered dice as the view gives them */
+    int me, valid;              /* valid: R.s is in step with the game */
+    Step pend[MAXSTEP]; int npend, ipend; Move pmv[2]; int npmv;    /* the answers still to give for the chosen move; the engine moves they amount to */
+    long n_dec, n_engine, n_chain, n_rule, n_zero, n_rebuild_fail, n_nomatch, n_fp_same, n_fp_seen, n_battle, n_battle_miss, n_hunt, n_turn, n_rule_kind[NKIND + 1];
+    State prev; Move prevmv[2]; int nprev, prev_ok;     /* the position before our last move, and the move: the Hunt it sets off is played again from here */
+    int naz_plan; uint8_t naz_tgt[NREG], wk_tgt, mouth_tgt;       /* where our player's Nazgul plan puts them: carried out one figure at a time */
+    int box_turn, box_now, box_prev;        /* Free Peoples dice seen in the Hunt box this turn and the turn before (the view at the start of a turn no longer shows them) */
+    uint64_t rng;
+} Bot;
+
+static void bot_dice(Bot *B, const J *v) {
+    State *s = &B->R.s;
+    memset(s->dice, 0, sizeof s->dice);
+    for (int side = 0; side < 2; side++) {
+        const J *arr = j_get(j_get(v, "dice"), SIDE_KEY[side]); int pos = 0;
+        B->R.nd[side] = 0;
+        for (int i = 0; i < MAXDICE; i++) { B->R.dice[side][i].face = NFACE; B->R.dice[side][i].status = DS_USED; }
+        for (const J *d = arr ? arr->child : NULL; d; d = d->next, pos++) {
+            const J *ix = j_get(d, "die"); int i = ix && ix->type == J_NUM ? (int)ix->num : pos, f = face_of(j_str(d, "face"));
+            const char *st = j_str(d, "status"); int ds = find_key(st, DS_KEY, 4);
+            if (i < 0 || i >= MAXDICE) continue;
+            if (ds < 0) { const J *u = j_get(d, "used"); ds = u && u->num ? DS_USED : f >= 0 ? DS_AVAILABLE : DS_UNROLLED; }
+            B->R.dice[side][i].face = (uint8_t)(f < 0 ? NFACE : f); B->R.dice[side][i].status = (uint8_t)ds;
+            if (i + 1 > B->R.nd[side]) B->R.nd[side] = i + 1;
+            if (ds == DS_AVAILABLE && f >= 0) s->dice[side][f]++;
+        }
+    }
+}
+static int j_int(const J *o, const char *key, int dflt) { const J *e = j_get(o, key); return e && (e->type == J_NUM || e->type == J_BOOL) ? (int)e->num : dflt; }
+static void bot_cards(State *s, const J *list, int where) {
+    for (const J *e = list ? list->child : NULL; e; e = e->next) { int c = e->type == J_STR ? card_of(e->str) : -1; if (c >= 0) s->card_where[c] = (uint8_t)where; }
+}
+/* The position of a view, resting at an action decision of our side. Returns 0, or 1 if it cannot be built. */
+static int bot_view(Bot *B, const J *v, int who, char *err, int en) {      /* who: the side resting at its action decision */
+    State *s = &B->R.s; int me = B->me, opp = 1 - me;
+    const J *regs = j_get(v, "regions"), *f = j_get(v, "fellowship"), *h = j_get(v, "hunt"), *cd = j_get(v, "cards");
+    if (!regs || !f || !h || !cd) { snprintf(err, (size_t)en, "the view lacks regions, fellowship, hunt or cards"); return 1; }
+    wotr_blank(s);
+    for (int c = 0; c < NCOMP; c++) s->comp_loc[c] = LOC_DEAD;
+    for (int m = 0; m < NMINION; m++) s->minion_loc[m] = LOC_NONE;
+    s->gandalf_white = s->aragorn = s->minion_seen = s->mouth_used = 0;
+    memset(s->pool_reg, 0, sizeof s->pool_reg); memset(s->pool_eli, 0, sizeof s->pool_eli); memset(s->pool_ldr, 0, sizeof s->pool_ldr); s->pool_naz = 0;
+    memset(s->cas_reg, 0, sizeof s->cas_reg);
+    for (const J *e = regs->child; e; e = e->next) {
+        int r = region_of(e->key); if (r < 0) continue;
+        int cs = side_of(j_str(e, "control"));
+        if (is_settlement(r) && cs >= 0) s->ctrl[r] = (uint8_t)cs;
+        s->siege[r] = (uint8_t)(j_int(e, "siege", 0) != 0);
+        const J *us = j_get(e, "units");
+        for (const J *u = us ? us->child : NULL; u; u = u->next) {
+            int nat = nation_of(j_str(u, "nation")), cnt = j_int(u, "n", 1); const char *k = j_str(u, "unit");
+            if (!k || cnt <= 0) continue;
+            if (!strcmp(k, "nazgul")) s->naz[r] = (uint8_t)(s->naz[r] + cnt);
+            else if (nat < 0) continue;
+            else if (!strcmp(k, "regular")) s->reg[r][nat] = (uint8_t)(s->reg[r][nat] + cnt);
+            else if (!strcmp(k, "elite")) s->eli[r][nat] = (uint8_t)(s->eli[r][nat] + cnt);
+            else if (!strcmp(k, "leader") && nat < NFPNAT) s->ldr[r][nat] = (uint8_t)(s->ldr[r][nat] + cnt);
+        }
+    }
+    /* characters: the plain ones first, then the two upgrades over them */
+    const J *chs = j_get(v, "characters");
+    for (int pass = 0; pass < 2; pass++) for (const J *e = chs ? chs->child : NULL; e; e = e->next) {
+        int ch = char_of(e->key); const char *w = j_str(e, "where"); if (ch < 0 || !w) continue;
+        int loc = !strcmp(w, "fellowship") ? LOC_FSP : !strcmp(w, "eliminated") ? LOC_DEAD : !strcmp(w, "region") ? region_of(j_str(e, "region")) : !strcmp(w, "replaced") ? -2 : LOC_NONE;
+        if (loc == -1 || loc == -2) continue;
+        if (!pass && ch < NCOMP) { if (loc != LOC_NONE) s->comp_loc[ch] = (uint8_t)loc; }
+        else if (!pass && ch >= CH_MINION0 && ch < CH_MINION0 + NMINION) { s->minion_loc[ch - CH_MINION0] = (uint8_t)loc; if (loc != LOC_NONE) s->minion_seen = 1; }
+        else if (pass && ch == CH_GANDALF_WHITE && loc != LOC_NONE) { s->gandalf_white = 1; s->comp_loc[C_GANDALF] = (uint8_t)loc; }
+        else if (pass && ch == CH_ARAGORN && loc != LOC_NONE) { s->aragorn = 1; s->comp_loc[C_STRIDER] = (uint8_t)loc; }
+    }
+    const J *pol = j_get(v, "politics"), *rf = j_get(v, "reinforcements"), *cas = j_get(v, "casualties");
+    for (int n = 0; n < NNAT; n++) {
+        const J *e = j_get(pol, NATION_KEY[n]); if (e) { s->pol[n] = (uint8_t)j_int(e, "step", s->pol[n]); s->active[n] = (uint8_t)(j_int(e, "active", s->active[n]) != 0); }
+        e = j_get(rf, NATION_KEY[n]);
+        if (e) { s->pool_reg[n] = (uint8_t)j_int(e, "regular", 0); s->pool_eli[n] = (uint8_t)j_int(e, "elite", 0); if (n < NFPNAT) s->pool_ldr[n] = (uint8_t)j_int(e, "leader", 0); if (n == SAURON) s->pool_naz = (uint8_t)j_int(e, "nazgul", 0); }
+        e = j_get(cas, NATION_KEY[n]); if (e && n < NFPNAT) s->cas_reg[n] = (uint8_t)j_int(e, "regular", 0);
+    }
+    { int r = region_of(j_str(f, "region")); if (r >= 0) s->fsp_loc = (uint8_t)r; }
+    s->progress = (uint8_t)j_int(f, "progress", 0); s->corruption = (uint8_t)j_int(f, "corruption", 0); s->revealed = (uint8_t)!j_int(f, "hidden", 1);
+    { const J *m = j_get(f, "mordor"); s->mordor = (int8_t)(m && m->type == J_NUM ? (int)m->num : -1); }
+    { const J *cl = j_get(f, "companions"); for (const J *e = cl ? cl->child : NULL; e; e = e->next) { int ch = e->type == J_STR ? char_of(e->str) : -1; if (ch == CH_GANDALF_WHITE) ch = C_GANDALF; if (ch == CH_ARAGORN) ch = C_STRIDER; if (ch >= 0 && ch < NCOMP) s->comp_loc[ch] = LOC_FSP; } }
+    { const char *g = j_str(f, "guide"); int ch = char_of(g); s->guide = (uint8_t)(g && !strcmp(g, "gollum") ? GOLLUM : ch == CH_GANDALF_WHITE ? C_GANDALF : ch == CH_ARAGORN ? C_STRIDER : ch >= 0 && ch < NCOMP ? ch : GOLLUM); }
+    bot_dice(B, v);
+    { const J *box = j_get(h, "box"); s->hunt_fp = (uint8_t)j_int(box, "FREE_PEOPLES", 0); s->hunt_sh = (uint8_t)j_int(box, "SHADOW", 0); }
+    s->hunt_fp_prev = (uint8_t)(j_int(h, "shadow_must_hunt", 0) != 0); s->fsp_acted = (uint8_t)(s->hunt_fp > 0);
+    memset(s->tile_pool, 0, sizeof s->tile_pool); memset(s->tile_out, 0, sizeof s->tile_out); memset(s->special_st, 0, sizeof s->special_st);
+    static const char *const place[5] = { "pool", "ready", "drawn", "removed", "reserve" };
+    for (int w = 0; w < 5; w++) { const J *l = j_get(h, place[w]);
+        for (const J *e = l ? l->child : NULL; e; e = e->next) {
+            int t = e->type == J_STR ? tile_of(e->str) : -1; if (t < 0) continue;
+            if (w == 0) { s->tile_pool[t]++; if (t >= NSTD_TILE) s->special_st[t] = 2; }
+            else if (w == 1) { if (t >= NSTD_TILE) s->special_st[t] = 1; }
+            else if (w == 2 || w == 3) { if (t < NSTD_TILE) s->tile_out[t]++; else s->special_st[t] = 2; }
+        } }
+    for (int c = 0; c < NCARD; c++) s->card_where[c] = W_DECK;
+    bot_cards(s, j_get(j_get(cd, "discards"), "FREE_PEOPLES"), W_DISCARD); bot_cards(s, j_get(j_get(cd, "discards"), "SHADOW"), W_DISCARD);
+    bot_cards(s, j_get(j_get(cd, "on_table"), "FREE_PEOPLES"), W_TABLE); bot_cards(s, j_get(j_get(cd, "on_table"), "SHADOW"), W_TABLE);
+    bot_cards(s, j_get(cd, "discarded_face_down"), W_DISCARD); bot_cards(s, j_get(cd, "hand"), W_HAND);
+    {   /* the opponent's cards: so many in hand per deck, so many left in each deck, the rest discarded unseen; which ones is dealt at random below */
+        const J *bd = j_get(cd, "opponent_hand_by_deck"), *dk = j_get(j_get(cd, "decks"), SIDE_KEY[opp]);
+        int tot = j_int(cd, "opponent_hand", 0);
+        for (int d = 0; d < 2; d++) {
+            int hand = bd ? j_int(bd, DECK_KEY[d], 0) : d ? tot / 2 : tot - tot / 2, left = dk ? j_int(dk, DECK_KEY[d], -1) : -1, unk = 0, deck = opp * 2 + d;
+            for (int c = deck * 24; c < deck * 24 + 24; c++) unk += s->card_where[c] == W_DECK;
+            int gone = left >= 0 ? unk - hand - left : 0;
+            for (int c = deck * 24; c < deck * 24 + 24; c++) { if (s->card_where[c] != W_DECK) continue; if (hand > 0) { s->card_where[c] = W_HAND; hand--; } else if (gone > 0) { s->card_where[c] = W_DISCARD; gone--; } }
+        }
+    }
+    s->hand_n[0] = s->hand_n[1] = 0;
+    for (int c = 0; c < NCARD; c++) if (s->card_where[c] == W_HAND) s->hand_n[CARD_SIDE(c)]++;
+    { const J *er = j_get(v, "elven_rings"), *eu = j_get(v, "elven_ring_used");
+      for (int k = 0; k < 2; k++) { s->rings[k] = (uint8_t)j_int(er, SIDE_KEY[k], s->rings[k]); s->ring_used[k] = (uint8_t)(j_int(eu, SIDE_KEY[k], 0) != 0); } }
+    s->turn = (uint16_t)j_int(v, "turn", 1);
+    s->winner = 0; s->win_type = WIN_NONE; s->act_moves_left = 0; s->lock[0] = s->lock[1] = 0; s->comp_moved = 0; memset(&s->b, 0, sizeof s->b);
+    s->dplayer = (uint8_t)who; s->st[s->sp - 1].v[0] = (uint8_t)who;
+    wotr_determinize(s, me, B->rng += 0x1234567);
+    if (wotr_check(s, err, en)) return strstr(err, "hand over limit") ? 0 : 1;      /* (a hand over the limit is what a discard question looks like) */
+    return 0;
+}
+
+/* Is the option the answer a step stands for? Every field of the step must be in the option with the same value.
+ * Returns the number of other fields the option has ("o" and "text" aside), or -1 if it is not the answer. */
+static int opt_fits(const J *opt, const J *want) {
+    int extra = 0;
+    for (const J *w = want->child; w; w = w->next) {
+        const J *x = j_get(opt, w->key);
+        if (!x || x->type != w->type) return -1;
+        if (w->type == J_STR ? strcmp(x->str, w->str) != 0 : w->type == J_NUM || w->type == J_BOOL ? x->num != w->num : 0) return -1;
+    }
+    for (const J *x = opt->child; x; x = x->next) if (strcmp(x->key, "o") && strcmp(x->key, "text") && !j_get(want, x->key)) extra++;
+    return extra;
+}
+static int opt_number(const J *opt, int pos) { const J *o = j_get(opt, "o"); return o && o->type == J_NUM ? (int)o->num : pos; }
+static int find_option(const J *opts, const char *steptext) {      /* the option's number, or -1 */
+    char buf[260], *mem; snprintf(buf, sizeof buf, "{%s", steptext);
+    const J *want = j_parse(buf, &mem); if (!want) return -1;
+    int best = -1, be = 1 << 30, pos = 0;
+    for (const J *o = opts ? opts->child : NULL; o; o = o->next, pos++) { int e = opt_fits(o, want); if (e >= 0 && e < be) { be = e; best = opt_number(o, pos); } }
+    free(mem);
+    return best;
+}
+static int find_kind(const J *opts, const char *kind) {             /* the first option of that kind, or -1 */
+    int pos = 0;
+    for (const J *o = opts ? opts->child : NULL; o; o = o->next, pos++) { const char *k = j_str(o, "kind"); if (k && !strcmp(k, kind)) return opt_number(o, pos); }
+    return -1;
+}
+static int find_kv(const J *opts, const char *kind, const char *key, const char *val) {
+    int pos = 0;
+    for (const J *o = opts ? opts->child : NULL; o; o = o->next, pos++) { const char *k = j_str(o, "kind"), *x = j_str(o, key); if (k && !strcmp(k, kind) && x && !strcmp(x, val)) return opt_number(o, pos); }
+    return -1;
+}
+/* the fighting units of each side in a region of the view */
+static void view_count(const J *v, const char *region, int cnt[2]) {
+    cnt[0] = cnt[1] = 0;
+    const J *us = j_get(j_get(j_get(v, "regions"), region ? region : ""), "units");
+    for (const J *u = us ? us->child : NULL; u; u = u->next) {
+        int nat = nation_of(j_str(u, "nation")); const char *k = j_str(u, "unit");
+        if (nat >= 0 && k && (!strcmp(k, "regular") || !strcmp(k, "elite"))) cnt[NAT_SIDE(nat)] += j_int(u, "n", 1);
+    }
+}
+/* The written rules for the questions the engine does not yet answer. Returns an option number (0 if nothing better). */
+static int bot_rule(const Bot *B, int kind, const J *dec, const J *v) {
+    const J *opts = j_get(dec, "options"), *bt = j_get(v, "battle");
+    int o = -1, att = 0, def = 0, pos = 0;
+    if (bt && bt->type == J_OBJ) {
+        int as = side_of(j_str(bt, "attacker")), c[2]; const char *from = j_str(bt, "from"), *reg = j_str(bt, "region");
+        view_count(v, reg, c); def = as >= 0 ? c[1 - as] : 0;
+        const J *al = j_get(bt, "attackers");
+        for (const J *u = al ? al->child : NULL; u; u = u->next) att += j_int(u, "n", 1);
+        if (!att && as >= 0) { view_count(v, from && reg && strcmp(from, reg) ? from : reg, c); att = c[as]; }
+    }
+    switch (kind) {
+    case K_FELLOWSHIP_PHASE: if ((o = find_kind(opts, "enter_mordor")) < 0) o = find_kind(opts, "done"); break;
+    case K_HUNT_ALLOCATION: {       /* two dice, three once the Fellowship is in Mordor; the nearest count on offer */
+        const J *m = j_get(j_get(v, "fellowship"), "mordor"); int want = m && m->type == J_NUM ? 3 : 2, bd = 99;
+        for (const J *x = opts ? opts->child : NULL; x; x = x->next, pos++) { int c = j_int(x, "count", -9), d = c > want ? c - want : want - c; if (c >= 0 && d < bd) { bd = d; o = opt_number(x, pos); } }
+        break; }
+    case K_FIELD_OR_SIEGE: o = find_kind(opts, "siege"); break;
+    case K_COMBAT_CARD: o = find_kind(opts, "none"); break;
+    case K_CASUALTY: if ((o = find_kv(opts, "casualty", "unit", "regular")) < 0) o = find_kv(opts, "casualty", "effect", "reduce"); break;
+    case K_REMOVE_EXCESS_UNIT: o = find_kv(opts, "remove_unit", "unit", "regular"); break;
+    case K_CEASE_ATTACK: o = find_kind(opts, att >= def ? "continue" : "cease"); break;
+    case K_RETREAT: o = def >= att ? find_kind(opts, "stand") : find_kind(opts, "retreat"); break;
+    case K_EXTEND_SIEGE: o = att >= 2 * def + 2 ? find_kind(opts, "extend") : find_kind(opts, "stop"); break;
+    case K_ADVANCE: o = find_kind(opts, "advance"); break;
+    case K_HUNT_CASUALTY: {
+        const J *m = j_get(j_get(v, "fellowship"), "mordor"); int dmg = j_int(j_get(dec, "context"), "damage", 1);
+        if ((m && m->type == J_NUM) || dmg >= 2) { if ((o = find_kind(opts, "guide")) < 0) o = find_kind(opts, "random"); }
+        if (o < 0) o = find_kind(opts, "corruption");
+        break; }
+    case K_REVEAL_FELLOWSHIP: {     /* an own settlement if there is one, else a region without the enemy */
+        int best = -1;
+        for (const J *x = opts ? opts->child : NULL; x; x = x->next, pos++) {
+            const char *rk = j_str(x, "region"); int r = region_of(rk), c[2], sc; if (r < 0) continue;
+            view_count(v, rk, c);
+            const char *ctl = j_str(j_get(j_get(v, "regions"), rk), "control");
+            sc = (c[SH] ? -4 : 0) + (ctl && !strcmp(ctl, "SHADOW") ? -3 : 0) + (ctl && !strcmp(ctl, "FREE_PEOPLES") ? 2 : 0) + (c[FP] ? 1 : 0);
+            if (sc > best || o < 0) { best = sc; o = opt_number(x, pos); }
+        }
+        break; }
+    case K_WHITE_RIDER: case K_GUIDE_ABILITY: o = find_kind(opts, "use"); break;
+    case K_ARMY_MOVE: case K_RECRUIT: case K_MOVE_COMPANIONS: case K_MOVE_MINIONS: o = find_kind(opts, "end"); break;
+    case K_ARMY_SELECTION: { int bc = -1; for (const J *x = opts ? opts->child : NULL; x; x = x->next, pos++) { int c = j_int(x, "count", -1); if (c > bc) { bc = c; o = opt_number(x, pos); } } break; }
+    case K_JOIN_GROUP: o = find_kind(opts, "join"); break;
+    case K_ACTION: if ((o = find_kind(opts, "pass")) < 0) o = find_kv(opts, "use_die", "action", "draw_card"); break;
+    default: break;
+    }
+    (void)B;
+    return o < 0 ? 0 : o;
+}
+
+/* Sets our engine down inside the battle the view shows, at the question asked (the engine question `target`, ours):
+ * the board of the view, the same attack started on it, and the dice thrown again until the question comes up as the
+ * referee describes it (for a casualty: with that many hits to take; for the others: after a round without losses, so
+ * that the board stays the view's). Returns 1 with the position in B->R.s, or 0. */
+static int bot_battle(Bot *B, const J *v, const J *dec, int target) {
+    const J *bt = j_get(v, "battle"); if (!bt || bt->type != J_OBJ) return 0;
+    int att = side_of(j_str(bt, "attacker")), from = region_of(j_str(bt, "from")), to = region_of(j_str(bt, "region"));
+    if (att < 0 || to < 0) return 0;
+    if (from < 0) from = to;
+    char err[200];
+    if (bot_view(B, v, att, err, sizeof err)) return 0;
+    State pre = B->R.s;
+    pre.dice[att][F_ARMY]++;                                    /* the die that started the battle is spent in the view */
+    int areg = 0, aeli = 0, round = j_int(bt, "round", 1), hits = j_int(j_get(dec, "context"), "hits", -1), card[2] = {-1, -1};
+    { const J *al = j_get(bt, "attackers");
+      for (const J *u = al ? al->child : NULL; u; u = u->next) { const char *k = j_str(u, "unit"); if (k && !strcmp(k, "regular")) areg += j_int(u, "n", 1); else if (k && !strcmp(k, "elite")) aeli += j_int(u, "n", 1); } }
+    card[att] = card_of(j_str(bt, "attacker_card")); card[1 - att] = card_of(j_str(bt, "defender_card"));
+    for (int k = 0; k < 2; k++) if (card[k] >= 0 && pre.card_where[card[k]] != W_HAND && pre.card_where[card[k]] != W_TABLE) { pre.card_where[card[k]] = W_HAND; pre.hand_n[CARD_SIDE(card[k])]++; }
+    static Move mv[MAXMOVES], o[MAXMOVES];
+    wotr_prune = 0;
+    int n = wotr_moves(&pre, mv), pick = -1, best = -1;
+    for (int i = 0; i < n; i++) if (mv[i].type == M_ATTACK && mv[i].a == from && mv[i].b == to) { int sc = mv[i].c == areg && mv[i].d == aeli ? 1000 : mv[i].c + mv[i].d; if (sc > best) { best = sc; pick = i; } }
+    if (pick < 0) return 0;
+    int tot0 = units(&pre, FP, from) + units(&pre, SH, from) + (to != from ? units(&pre, FP, to) + units(&pre, SH, to) : 0);
+    for (uint64_t seed = 1; seed <= 3000; seed++) {
+        State t = pre; t.rng = seed * 0x9E3779B97F4A7C15ULL + B->rng;
+        wotr_apply(&t, mv[pick]);
+        if (t.b.active && round > 1) { t.b.round = (uint8_t)round; if (t.b.siege && t.b.max_rounds < round) t.b.max_rounds = (uint8_t)round; }
+        for (int stp = 0; stp < 24 && !t.winner && t.b.active; stp++) {
+            int mine = t.dplayer == B->me, ch = -1, fail = 0;
+            int tot = units(&t, FP, from) + units(&t, SH, from) + (to != from ? units(&t, FP, to) + units(&t, SH, to) : 0);
+            if (mine && t.dkind == target) {
+                const Frame *f = &t.st[t.sp - 1];
+                int ok = target == D_CASUALTY ? f->kind == FR_CASUALTY && (hits < 0 || f->v[2] == hits) : tot == tot0;
+                if (ok) { B->R.s = t; return 1; }
+                break;
+            }
+            int k = wotr_moves(&t, o);
+            if (k <= 0) break;
+            switch (t.dkind) {
+            case D_SIEGE_RETREAT: for (int j = 0; j < k; j++) if (o[j].a == 0) ch = j; break;                       /* the battle goes on in the field */
+            case D_BATTLE_CARD: { int want = card[t.dplayer] >= 0 ? card[t.dplayer] : 255; for (int j = 0; j < k; j++) if (o[j].a == want) ch = j; if (ch < 0) for (int j = 0; j < k; j++) if (o[j].a == 255) ch = j; break; }
+            case D_CONTINUE: for (int j = 0; j < k; j++) if (o[j].a == 1) ch = j; break;
+            case D_RETREAT: for (int j = 0; j < k; j++) if (o[j].a == 255) ch = j; break;
+            case D_CASUALTY: if (target == D_CASUALTY && !mine) ch = 0; else fail = 1; break;
+            case D_SIEGE_EXTEND: case D_ADVANCE: fail = 1; break;
+            default: ch = 0; break;
+            }
+            if (fail) break;
+            wotr_apply(&t, o[ch < 0 ? 0 : ch]);
+        }
+    }
+    return 0;
+}
+/* Our player's move in the position we hold, as one of the leaves; -1 if it is not among them. */
+static int bot_pick(Bot *B, Agent *ag, const Leaf *L, int nl) {
+    for (int full = 0; full < 2; full++) {       /* first as our player normally plays (purposeful moves only), then from the full list */
+        State c = B->R.s; float bv; int n, have2 = 0; Move m2; memset(&m2, 0, sizeof m2);
+        wotr_prune = !full;
+        Move m = agent_choose(ag, &c, &bv, &n);
+        if (m.type == M_NAZ_MOVE && m.d == 0 && m.c > 1) m.c = 1;        /* the protocol moves one Nazgul at a time: the others follow in the next questions */
+        for (int i = 0; i < nl; i++) {
+            if (memcmp(&L[i].mv[0], &m, sizeof m)) continue;
+            if (L[i].nmv == 1) { wotr_prune = 0; return i; }
+            if (!have2) { State t = B->R.s; wotr_apply(&t, m); m2 = agent_choose(ag, &t, &bv, &n); have2 = 1; }
+            if (L[i].mv[1].type == m2.type && L[i].mv[1].a == m2.a) { wotr_prune = 0; return i; }
+        }
+    }
+    wotr_prune = 0;
+    return -1;
+}
+static int chain_dkind(int dk) { return dk == D_ARMY_MOVE2 || dk == D_MUSTER2 || dk == D_COMP_MOVE || dk == D_NAZ_MOVE || dk == D_SEP_DEST || (dk >= D_CARD_REGION && dk < ND); }
+static void bot_applied(Bot *B) {       /* every answer of the chosen move is given: play it in our own picture too */
+    State *s = &B->R.s; State before = *s; uint32_t nr = s->nrand;
+    B->prev = before; memcpy(B->prevmv, B->pmv, sizeof B->prevmv); B->nprev = B->npmv; B->prev_ok = 1;
+    for (int k = 0; k < B->npmv; k++) if (!s->winner) wotr_apply(s, B->pmv[k]);
+    B->valid = !s->winner && s->dplayer == B->me && s->nrand == nr && chain_dkind(s->dkind);
+    if (B->valid) dice_sync(&B->R, &before, B->me, -1);
+    B->npend = B->ipend = 0; B->npmv = 0;
+}
+
+/* The Hunt our own move set off: the move is played again from the position before it, the dice and tiles falling anew,
+ * until the engine asks the question the referee asks (for the Hunt's damage: with that much damage). */
+static int bot_hunt(Bot *B, const J *dec, int target) {
+    if (!B->prev_ok || B->nprev < 1) return 0;
+    int dmg = j_int(j_get(dec, "context"), "damage", -1);
+    static Move o[MAXMOVES];
+    wotr_prune = 0;
+    for (uint64_t seed = 1; seed <= 2000; seed++) {
+        State t = B->prev; t.rng = seed * 0xD1342543DE82EF95ULL + B->rng;
+        for (int k = 0; k < B->nprev && !t.winner; k++) wotr_apply(&t, B->prevmv[k]);
+        for (int stp = 0; stp < 12 && !t.winner && t.dkind != D_ACTION; stp++) {
+            if (t.dplayer == B->me && t.dkind == target) {
+                const Frame *f = &t.st[t.sp - 1];
+                if (target != D_HUNT_RESPONSE || dmg < 0 || (f->kind == FR_HUNT && f->v[4] == dmg)) { B->R.s = t; return 1; }
+                break;
+            }
+            int k = wotr_moves(&t, o); if (k <= 0) break;
+            wotr_apply(&t, o[0]);
+        }
+    }
+    return 0;
+}
+/* The first question of the turn the view is in: the board of the view, the turn before ended in our engine, the cards
+ * put back as the view has them. Returns 1 with the position in B->R.s. */
+static int bot_turnstart(Bot *B, const J *v) {
+    char err[200];
+    if (bot_view(B, v, FP, err, sizeof err)) return 0;
+    State *s = &B->R.s; uint8_t cw[NCARD]; memcpy(cw, s->card_where, NCARD);
+    int turn = s->turn, must = s->hunt_fp_prev;
+    if (B->box_turn == turn && B->box_prev > must) must = B->box_prev;
+    for (int c = 0; c < NCARD; c++) if (s->card_where[c] == W_HAND) s->card_where[c] = W_DECK;      /* empty hands: the turn's draw then asks for no discard */
+    s->hand_n[0] = s->hand_n[1] = 0;
+    s->turn = (uint16_t)(turn > 0 ? turn - 1 : 0); s->hunt_fp = (uint8_t)must; s->hunt_sh = 0; s->fsp_acted = 1;
+    memset(s->dice, 0, sizeof s->dice); s->dice[FP][F_MUSTER] = 1;
+    static Move mv[MAXMOVES]; wotr_prune = 0;
+    int n = wotr_moves(s, mv), k = -1;
+    for (int i = 0; i < n; i++) if (mv[i].type == M_SKIP) k = i;
+    if (k < 0) return 0;
+    wotr_apply(s, mv[k]);
+    if (s->winner || s->turn != turn) return 0;
+    memcpy(s->card_where, cw, NCARD); s->hand_n[0] = s->hand_n[1] = 0;
+    for (int c = 0; c < NCARD; c++) if (s->card_where[c] == W_HAND) s->hand_n[CARD_SIDE(c)]++;
+    return 1;
+}
+static int fsp_dkind(int dk) { return dk == D_FSP_DECLARE || dk == D_GUIDE || dk == D_ENTER_MORDOR; }
+
+/* Do our leaves ask the same question as the referee: every option of the referee is the first answer of a leaf? */
+static int same_question(const Leaf *L, int nl, int kind, const J *opts) {
+    int n = 0;
+    for (const J *x = opts ? opts->child : NULL; x; x = x->next, n++) {
+        int hit = 0;
+        for (int i = 0; i < nl && !hit; i++) {
+            if (L[i].nstep <= 0 || L[i].st[0].kind != kind) continue;
+            char buf[260], *mem; snprintf(buf, sizeof buf, "{%s", L[i].st[0].text);
+            const J *want = j_parse(buf, &mem); if (!want) continue;
+            hit = opt_fits(x, want) >= 0; free(mem);
+        }
+        if (!hit) return 0;
+    }
+    return n > 0;
+}
+/* A question that follows our own move after something random (a card's question, a new Guide): the move is played again
+ * from the position before it until the engine asks us the same question with the same options. */
+static int bot_replay(Bot *B, Leaf *L, int kind, const J *opts) {
+    if (!B->prev_ok || B->nprev < 1) return 0;
+    static Move o[MAXMOVES];
+    for (uint64_t seed = 1; seed <= 300; seed++) {
+        State t = B->prev; t.rng = seed * 0xA0761D6478BD642FULL + B->rng;
+        wotr_prune = 0;
+        for (int k = 0; k < B->nprev && !t.winner; k++) wotr_apply(&t, B->prevmv[k]);
+        for (int stp = 0; stp < 10 && !t.winner && t.dkind != D_ACTION; stp++) {
+            if (t.dplayer == B->me) { B->R.s = t; int nl = build_leaves(&B->R, L); if (same_question(L, nl, kind, opts)) return 1; }
+            int k = wotr_moves(&t, o); if (k <= 0) break;
+            wotr_apply(&t, o[0]);
+        }
+    }
+    return 0;
+}
+
+/* The Nazgul question. Our player thinks in whole plans (all Nazgul to an Army, one to the Fellowship); the protocol
+ * moves one figure at a time. The plan is chosen once, and each question gets the next single flight toward it.
+ * Returns the leaf, -1 if none fits, -2 if our player chose no plan (then the ordinary choice is made). */
+static int naz_pick(Bot *B, Agent *ag, const Leaf *L, int nl) {
+    const State *s = &B->R.s;
+    if (!B->naz_plan) {
+        State c = *s; float bv; int n;
+        wotr_prune = 1; Move m = agent_choose(ag, &c, &bv, &n); wotr_prune = 0;
+        if (m.type != M_NAZ_PLAN) return -2;
+        State t = *s; wotr_apply(&t, m);
+        memcpy(B->naz_tgt, t.naz, NREG); B->wk_tgt = t.minion_loc[M_WK]; B->mouth_tgt = t.minion_loc[M_MOUTH]; B->naz_plan = 1;
+    }
+    int from = -1, to = -1, d = 0;
+    for (int r = 0; r < NREG; r++) { if (s->naz[r] > B->naz_tgt[r] && from < 0) from = r; if (s->naz[r] < B->naz_tgt[r] && to < 0) to = r; }
+    if (from < 0 || to < 0) {
+        from = to = -1;
+        if (s->minion_loc[M_WK] < NREG && B->wk_tgt < NREG && s->minion_loc[M_WK] != B->wk_tgt) { from = s->minion_loc[M_WK]; to = B->wk_tgt; d = 1; }
+        else if (s->minion_loc[M_MOUTH] < NREG && B->mouth_tgt < NREG && s->minion_loc[M_MOUTH] != B->mouth_tgt) { from = s->minion_loc[M_MOUTH]; to = B->mouth_tgt; d = 2; }
+    }
+    if (from >= 0) for (int i = 0; i < nl; i++) if (L[i].mv[0].type == M_NAZ_MOVE && L[i].mv[0].a == from && L[i].mv[0].b == to && L[i].mv[0].d == d && (d || L[i].mv[0].c == 1)) return i;
+    for (int i = 0; i < nl; i++) if (L[i].mv[0].type != M_NAZ_MOVE) return i;        /* the plan is carried out (or its next flight is not on offer): end */
+    return -1;
+}
+
+/* Takes leaf i as the move chosen: returns the option that is its first answer and keeps the rest to give; -1 if the
+ * referee does not offer it (the same move paid with another die of that face is tried too). */
+static int bot_take(Bot *B, const Leaf *L, int nl, int i, int kind, const J *opts) {
+    int o;
+    if (i < 0 || L[i].nstep <= 0 || L[i].st[0].kind != kind) return -1;
+    if (find_option(opts, L[i].st[0].text) < 0)
+        for (int j = 0; j < nl; j++) if (j != i && L[j].nmv == L[i].nmv && !memcmp(L[j].mv, L[i].mv, sizeof(Move) * L[i].nmv) && L[j].nstep > 0 && find_option(opts, L[j].st[0].text) >= 0) { i = j; break; }
+    if ((o = find_option(opts, L[i].st[0].text)) < 0) return -1;
+    memcpy(B->pend, L[i].st, sizeof(Step) * L[i].nstep); B->npend = L[i].nstep; B->ipend = 1;
+    B->npmv = L[i].nmv; memcpy(B->pmv, L[i].mv, sizeof(Move) * L[i].nmv);
+    if (B->ipend == B->npend) bot_applied(B);
+    return o;
+}
+static int bot_decide(Bot *B, Agent *ag, const J *dec, const J *v) {
+    static Leaf *L; if (!L) L = malloc(sizeof(Leaf) * MAXLEAF);
+    const J *opts = j_get(dec, "options");
+    int kind = kind_of(j_str(dec, "kind")), o;
+    B->n_dec++;
+    {   int t = j_int(v, "turn", 0), bx = j_int(j_get(j_get(v, "hunt"), "box"), "FREE_PEOPLES", 0);
+        if (t != B->box_turn) { B->box_prev = t == B->box_turn + 1 ? B->box_now : -1; B->box_turn = t; B->box_now = 0; }
+        if (bx > B->box_now) B->box_now = bx; }
+    if (B->ipend < B->npend) {          /* an answer of the move already chosen */
+        for (int k = B->ipend; k < B->npend; k++) {
+            if (B->pend[k].kind != kind || (o = find_option(opts, B->pend[k].text)) < 0) continue;
+            Step t = B->pend[k]; for (int j = k; j > B->ipend; j--) B->pend[j] = B->pend[j - 1]; B->pend[B->ipend++] = t;
+            if (B->ipend == B->npend) bot_applied(B);
+            B->n_chain++; return o;
+        }
+        /* the referee asks something else: if only the "which units" answers were left, the move is made as far as we are concerned */
+        int only = B->ipend > 0;
+        for (int k = B->ipend; k < B->npend; k++) only &= B->pend[k].kind == K_ARMY_SELECTION || B->pend[k].kind == K_JOIN_GROUP;
+        if (only) bot_applied(B); else { fprintf(stderr, "bot: expected %s (%s), asked %s; plan dropped\n", KIND_KEY[B->pend[B->ipend].kind], B->pend[B->ipend].text, kind >= 0 ? KIND_KEY[kind] : "?"); B->npend = B->ipend = 0; B->valid = 0; B->n_nomatch++; }
+    }
+    if (kind == K_ACTION) {             /* a fresh picture from the view */
+        char err[200];
+        B->prev_ok = 0; B->naz_plan = 0;
+        B->valid = !bot_view(B, v, B->me, err, sizeof err);
+        if (!B->valid) { B->n_rebuild_fail++; fprintf(stderr, "bot: cannot rebuild the position (turn %d): %s\n", j_int(v, "turn", 0), err); }
+    }
+    if (B->valid && !B->R.s.winner && B->R.s.dplayer == B->me && (kind == K_ACTION || kind == K_ARMY_MOVE || kind == K_RECRUIT || kind == K_MOVE_COMPANIONS || kind == K_MOVE_MINIONS || kind == K_SEPARATE_COMPANIONS || kind == K_CARD_CHOICE)) {
+        wotr_prune = 0;
+        int nl = build_leaves(&B->R, L);
+        if (kind == K_ACTION) {         /* do we list the same options as the referee? (its fingerprint tells) */
+            static const char *seen[4096]; int ns = 0; uint64_t hsh = 0xcbf29ce484222325ULL; char tmp[260];
+            for (int i = 0; i < nl && ns < 4096; i++) { int dup = 0; for (int j = 0; j < ns && !dup; j++) dup = !strcmp(seen[j], L[i].st[0].text); if (!dup) seen[ns++] = L[i].st[0].text; }
+            snprintf(tmp, sizeof tmp, "%s\n%s\n%d\n", SIDE_KEY[B->me], KIND_KEY[kind], ns); hsh = fnv1a(hsh, tmp);
+            for (int i = 0; i < ns; i++) { snprintf(tmp, sizeof tmp, "{\"o\":%d,%s\n", i, seen[i]); hsh = fnv1a(hsh, tmp); }
+            snprintf(tmp, sizeof tmp, "%016llx", (unsigned long long)hsh);
+            const char *fp = j_str(dec, "fingerprint"); B->n_fp_seen++; B->n_fp_same += fp && !strcmp(fp, tmp);
+            if (fp && strcmp(fp, tmp) && getenv("WOTR_BOT_DEBUG")) fprintf(stderr, "bot: options differ at turn %d: we list %d, the referee %d\n", B->R.s.turn, ns, j_len(opts));
+        }
+        int i = !nl ? -1 : B->R.s.dkind == D_NAZ_MOVE ? naz_pick(B, ag, L, nl) : -2;
+        if (i == -2) i = bot_pick(B, ag, L, nl);
+        if ((o = bot_take(B, L, nl, i, kind, opts)) >= 0) { B->n_engine++; return o; }
+        if (kind == K_ACTION && B->me == SH && !B->R.s.mouth_used) {       /* the Mouth of Sauron's die may be spent already this turn: the view does not say */
+            B->R.s.mouth_used = 1; wotr_prune = 0;
+            nl = build_leaves(&B->R, L); i = nl ? bot_pick(B, ag, L, nl) : -1;
+            if ((o = bot_take(B, L, nl, i, kind, opts)) >= 0) { B->n_engine++; return o; }
+        }
+        B->n_nomatch++; B->valid = 0;
+        if (i >= 0) fprintf(stderr, "bot: our move is not among the referee's options (%s: %s)\n", kind >= 0 ? KIND_KEY[kind] : "?", L[i].nstep ? L[i].st[0].text : "");
+        else fprintf(stderr, "bot: our move is not among our own leaves (%s, engine question %d)\n", kind >= 0 ? KIND_KEY[kind] : "?", B->R.s.dkind);
+    } else if (kind != K_ACTION) B->valid = 0;         /* something happened that our picture does not follow */
+    {   /* a question inside a battle: set the engine down in it and let our player answer */
+        int target = kind == K_COMBAT_CARD ? D_BATTLE_CARD : kind == K_CASUALTY ? D_CASUALTY : kind == K_FIELD_OR_SIEGE ? D_SIEGE_RETREAT : kind == K_CEASE_ATTACK ? D_CONTINUE
+                   : kind == K_RETREAT ? D_RETREAT : kind == K_EXTEND_SIEGE ? D_SIEGE_EXTEND : -1;
+        if (target >= 0 && j_len(opts) > 1 && !getenv("WOTR_BOT_NOBATTLE") && bot_battle(B, v, dec, target)) {
+            wotr_prune = 0;
+            int nl = build_leaves(&B->R, L), i = nl ? bot_pick(B, ag, L, nl) : -1;
+            B->valid = 0;
+            if (i >= 0 && L[i].nstep > 0 && (o = find_option(opts, L[i].st[0].text)) >= 0) { B->n_battle++; return o; }
+            B->n_nomatch++;
+            fprintf(stderr, "bot: battle question %s: our answer is not among the referee's options (%s)\n", KIND_KEY[kind], i >= 0 && L[i].nstep ? L[i].st[0].text : "none");
+        } else if (target >= 0 && j_len(opts) > 1) B->n_battle_miss++;
+    }
+    if ((kind == K_HUNT_CASUALTY || kind == K_REVEAL_FELLOWSHIP) && j_len(opts) > 1 && bot_hunt(B, dec, kind == K_HUNT_CASUALTY ? D_HUNT_RESPONSE : D_REVEAL_DEST)) {
+        wotr_prune = 0;
+        int nl = build_leaves(&B->R, L), i = nl ? bot_pick(B, ag, L, nl) : -1;
+        B->valid = 0;
+        if (i >= 0 && L[i].nstep > 0 && (o = find_option(opts, L[i].st[0].text)) >= 0) { B->n_hunt++; return o; }
+    }
+    if ((kind == K_FELLOWSHIP_PHASE && B->me == FP) || (kind == K_HUNT_ALLOCATION && B->me == SH)) {
+        static Move mv[MAXMOVES];
+        /* First the engine step that asks exactly the referee's question (a referee that asks the phase step by step, as
+           ours does); failing that, the first step where our player wants something the referee offers (one menu for the phase). */
+        for (int strict = 1; strict >= 0 && j_len(opts) > 1; strict--) {
+            if (!bot_turnstart(B, v)) break;
+            State *s = &B->R.s;
+            B->valid = 0;
+            for (int stp = 0; stp < 5 && !s->winner; stp++) {
+                wotr_prune = 0;
+                if (s->dplayer == FP && fsp_dkind(s->dkind) && B->me == SH) {       /* the Free Peoples' phase is over in the view: pass it by */
+                    int n = wotr_moves(s, mv), ch = 0;
+                    for (int j = 0; j < n; j++) if (mv[j].a == (s->dkind == D_FSP_DECLARE ? 255 : s->dkind == D_GUIDE ? s->guide : 0)) ch = j;
+                    wotr_apply(s, mv[ch]); continue;
+                }
+                if (!(s->dplayer == B->me && (B->me == FP ? fsp_dkind(s->dkind) : s->dkind == D_HUNT_ALLOC))) break;
+                int nl = build_leaves(&B->R, L);
+                if (strict && B->me == FP && !same_question(L, nl, kind, opts)) {     /* not this step: pass it by with "nothing" */
+                    int dl = -1; for (int j = 0; j < nl; j++) if (strstr(L[j].st[0].text, "\"done\"")) dl = j;
+                    if (dl < 0) break;
+                    wotr_apply(s, L[dl].mv[0]); continue;
+                }
+                int i = nl ? bot_pick(B, ag, L, nl) : -1;
+                if (i < 0 || L[i].nstep <= 0) break;
+                if ((o = find_option(opts, L[i].st[0].text)) >= 0 && (strict || !strstr(L[i].st[0].text, "\"done\""))) { B->n_turn++; return o; }
+                if (B->me == FP && strstr(L[i].st[0].text, "\"done\"")) { wotr_apply(s, L[i].mv[0]); continue; }     /* nothing to do at this step: on to the next */
+                break;
+            }
+            if (B->me == SH) break;
+        }
+        if (B->me == FP && j_len(opts) > 1 && (o = find_kind(opts, "done")) >= 0) { B->n_turn++; return o; }
+    }
+    if ((kind == K_CARD_CHOICE || kind == K_CHOOSE_GUIDE || kind == K_SEPARATE_COMPANIONS || kind == K_GUIDE_ABILITY) && j_len(opts) > 1 && bot_replay(B, L, kind, opts)) {
+        wotr_prune = 0;
+        int nl = build_leaves(&B->R, L), i = nl ? bot_pick(B, ag, L, nl) : -1;
+        B->valid = 0;
+        if (i >= 0 && L[i].nstep > 0 && (o = find_option(opts, L[i].st[0].text)) >= 0) { B->n_hunt++; return o; }
+    }
+    if (kind == K_DISCARD_EXCESS_CARD && j_len(opts) > 1) {       /* the discard that leaves the position our network likes best */
+        char err[200];
+        if (!bot_view(B, v, B->me, err, sizeof err)) {
+            int pos = 0, bo = -1; float bv = 0;
+            B->valid = 0;
+            for (const J *x = opts->child; x; x = x->next, pos++) {
+                int c = card_of(j_str(x, "card")); if (c < 0 || B->R.s.card_where[c] != W_HAND) continue;
+                State t = B->R.s; t.card_where[c] = W_DISCARD; t.hand_n[CARD_SIDE(c)]--;
+                ag->has_root = 0;
+                float val = agent_value(ag, &t); if (B->me == SH) val = -val;
+                if (bo < 0 || val > bv) { bv = val; bo = opt_number(x, pos); }
+            }
+            if (bo >= 0) { B->n_turn++; return bo; }
+        }
+    }
+    o = bot_rule(B, kind, dec, v);
+    B->n_rule++; B->n_rule_kind[kind >= 0 && kind < NKIND ? kind : NKIND] += j_len(opts) > 1;
+    return o;
+}
+static int cmd_bot(int argc, char **argv) {
+    static Bot B; static Agent ag;
+    Player *p = malloc(sizeof(Player));
+    if (!p || player_load(p, argv[2])) { fprintf(stderr, "cannot load the player %s\n", argv[2]); return 1; }
+    setenv("WOTR_W", "12:0,18:0", 0); setenv("WOTR_NUDGE", "0.3", 0); setenv("WOTR_HUMAN_SH", "0.1", 0); setenv("WOTR_HUMAN_FP", "0.1", 0);
+    memset(&ag, 0, sizeof ag); memset(&B, 0, sizeof B);
+    ag.net[FP] = &p->fp; ag.net[SH] = &p->sh; ag.samples = 3; ag.temp = 0.02f; ag.dpol[FP] = &p->pol[FP]; ag.dpol[SH] = &p->pol[SH];
+    B.R.ext = -1; B.rng = 0x9E3779B97F4A7C15ULL; ag.rng = 12345;
+    char *line, *mem, out[400];
+    while ((line = read_line())) {
+        const J *m = j_parse(line, &mem);
+        if (!m) continue;
+        const char *type = j_str(m, "type"); int id = j_int(m, "id", 0);
+        if (!type) { free(mem); continue; }
+        if (!strcmp(type, "hello")) {
+            const char *tok = getenv("WOTR_BOT_TOKEN");
+            if (tok) snprintf(out, sizeof out, "{\"type\":\"hello\",\"id\":%d,\"protocol\":\"wotr-bot/0.2\",\"name\":\"CWOTR\",\"version\":\"0.2\",\"events\":false,\"rulesets\":[\"base\"],\"token\":\"%s\"}", id, tok);
+            else snprintf(out, sizeof out, "{\"type\":\"hello\",\"id\":%d,\"protocol\":\"wotr-bot/0.2\",\"name\":\"CWOTR\",\"version\":\"0.2\",\"events\":false,\"rulesets\":[\"base\"]}", id);
+            send_line(out);
+        } else if (!strcmp(type, "new_game")) {
+            B.me = side_of(j_str(m, "side")); if (B.me < 0) B.me = FP;
+            B.valid = 0; B.npend = B.ipend = 0;
+            uint64_t sb = (uint64_t)j_int(m, "seed_bot", 1); ag.rng = sb * 31 + 7; B.rng = sb * 77 + 5;
+            if (B.me == SH && !getenv("WOTR_BOT_NOLOOK")) { ag.depth = 3; ag.width = 4; ag.replies = 1; ag.narrow = 6; ag.taper = 0; } else ag.depth = 0;    /* our Shadow looks ahead; our Free Peoples play one step ahead */
+            fprintf(stderr, "bot: new game %s, we play %s\n", j_str(m, "game") ? j_str(m, "game") : "?", B.me == FP ? "the Free Peoples" : "the Shadow");
+            snprintf(out, sizeof out, "{\"type\":\"ready\",\"id\":%d}", id); send_line(out);
+        } else if (!strcmp(type, "decide")) {
+            const J *dec = j_get(m, "decision"), *v = j_get(m, "view");
+            int o = dec ? bot_decide(&B, &ag, dec, v) : 0;
+            const char *fp = j_str(dec, "fingerprint");
+            if (fp && strlen(fp) < 40) snprintf(out, sizeof out, "{\"type\":\"choice\",\"id\":%d,\"o\":%d,\"fingerprint\":\"%s\"}", id, o, fp);
+            else snprintf(out, sizeof out, "{\"type\":\"choice\",\"id\":%d,\"o\":%d}", id, o);
+            send_line(out);
+        } else if (!strcmp(type, "game_over")) {
+            fprintf(stderr, "bot: game over, winner %s by %s on turn %d\n", j_str(m, "winner") ? j_str(m, "winner") : "none", j_str(m, "how") ? j_str(m, "how") : "?", j_int(m, "turn", 0));
+            fprintf(stderr, "BOT decisions=%ld by_engine=%ld continuing_a_move=%ld in_battle_by_engine=%ld battle_not_reached=%ld hunt_by_engine=%ld turn_start_by_engine=%ld by_rule=%ld not_matched=%ld rebuild_failed=%ld action_questions=%ld same_options_as_referee=%ld\n",
+                    B.n_dec, B.n_engine, B.n_chain, B.n_battle, B.n_battle_miss, B.n_hunt, B.n_turn, B.n_rule, B.n_nomatch, B.n_rebuild_fail, B.n_fp_seen, B.n_fp_same);
+            fprintf(stderr, "RULES"); for (int k = 0; k <= NKIND; k++) if (B.n_rule_kind[k]) fprintf(stderr, " %s=%ld", k < NKIND ? KIND_KEY[k] : "unknown", B.n_rule_kind[k]); fprintf(stderr, "\n");
+        } else if (!strcmp(type, "error") || !strcmp(type, "timeout")) {
+            fprintf(stderr, "bot: the referee says %s\n", line);
+        } else if (!strcmp(type, "quit")) { free(mem); break; }
+        free(mem);
+    }
+    return 0;
+}
+
 int main(int argc, char **argv) {
     wotr_global_init();
     feat_init();
@@ -1300,6 +1902,7 @@ int main(int argc, char **argv) {
     }
     if (argc >= 5 && !strcmp(argv[1], "mock")) return cmd_referee(argc, argv, 1);
     if (argc >= 4 && !strcmp(argv[1], "replay")) return cmd_replay(argc, argv);
-    fprintf(stderr, "usage: bridge names <vocabulary.json>\n       bridge play <player> <fp|sh: the outside bot's side> <seed> [clock ms=10000]   (referee, with the measured settings)\n       bridge referee <player|prior> <fp|sh: the outside bot's side> <seed> [clock ms=10000] [sims]\n       bridge mock <player|prior> <games> <seed>\n       bridge replay <referee log> <out file> [outside|ours|all]\n");
+    if (argc >= 3 && !strcmp(argv[1], "bot")) return cmd_bot(argc, argv);
+    fprintf(stderr, "usage: bridge names <vocabulary.json>\n       bridge bot <player>   (our player as a protocol bot on stdin/stdout)\n       bridge play <player> <fp|sh: the outside bot's side> <seed> [clock ms=10000]   (referee, with the measured settings)\n       bridge referee <player|prior> <fp|sh: the outside bot's side> <seed> [clock ms=10000] [sims]\n       bridge mock <player|prior> <games> <seed>\n       bridge replay <referee log> <out file> [outside|ours|all]\n");
     return 2;
 }

@@ -56,7 +56,7 @@ static int g_deep[2][6];            /* WOTR_DEEP_FP / WOTR_DEEP_SH="depth,width,
    that are sampled for training, the move is chosen with the look-ahead (deep() in agent.c), and the position's
    target becomes  (1 - share) x the usual one (result + partial rewards)  +  share x the look-ahead's estimate.
    The games are otherwise played by the quick one-action search, so the cost is a few look-aheads a game. */
-static int g_teach[3]; static float g_teach_share = 0, g_teach_part = 1;     /* part: the fraction of sampled action decisions that get it (a fifth number in WOTR_TEACH), to keep a round short */
+static int g_teach[3]; static float g_teach_share = 0, g_teach_part = 1; static int g_teach_pol;     /* part: the fraction of sampled action decisions that get it (a fifth number in WOTR_TEACH), to keep a round short */
 /* Specialist networks (WOTR_SPEC=1; see spec_group in agent.c). Each family's pair starts as a copy of the main pair
    and is then trained only on positions that follow one of its decisions, toward the search's estimate at the first
    decision of the following turn (the real result if the game ends first). Their formula share, which also scales
@@ -76,7 +76,7 @@ static float g_balance = 0;
    position, which includes the strategy formula's share. The network alone cannot conquer (played with no formula,
    Shadow's conquest wins fall from 60% to 3%): trained only on results, it never picked up the formula's small
    step-by-step preferences. This lets it absorb them, so that the formula's share can then really be faded out. */
-static float g_absorb = 0;
+static float g_absorb = 0; static float g_lambda = 0;
 static int g_dopen = 0; static float g_dgap = 0;      /* WOTR_DEEP_GAP=<x>: with WOTR_DEEP_OPEN, look ahead only where the two best one-step scores are within x log-odds */
 static float g_open = 0;            /* WOTR_OPEN=<x>: Shadow's exploration setting on turns 1-3 of training games (0: no different from later turns) */
 static float g_temp_sh = 0;         /* WOTR_TEMP_SH=<x>: Shadow's own exploration setting in training games (0: the same as the Free Peoples') */
@@ -235,6 +235,7 @@ static void play_game(Job *j, uint64_t seed) {
     static _Thread_local uint8_t sr_at[MAXREC], ch[42][NREG]; int prev_reg = 255;      /* the settlement fought over in the battle decision that led to each position; who held every region at the start of each turn */
     static _Thread_local int8_t sg_at[MAXREC]; float tv[42]; for (int q = 0; q < 42; q++) tv[q] = -1; int prev_grp = -1;     /* the specialist family whose decision led to each position; the search's estimate at the first decision of each turn */
     static _Thread_local float rt_at[MAXREC];      /* the rollout chooser's own estimate where it made the decision (WOTR_ROLL_TEACH) */
+    static _Thread_local float sv_at[MAXREC];      /* WOTR_LAMBDA: the deciding side's plain estimate of the position */
     static _Thread_local float ab_at[MAXREC];      /* the value the search itself gave the position (formula share included), for WOTR_ABSORB */
     static _Thread_local float phi_at[MAXREC], dv_at[MAXREC];     /* progress score; the look-ahead's estimate where one was made (else -1) */
     uint16_t hits_hist[40][2]; uint8_t tiles_hist[40], siege_hist[40];   /* cumulative hits and tiles, FP strongholds besieged */
@@ -297,6 +298,13 @@ static void play_game(Job *j, uint64_t seed) {
             }
         }
         if (dopen) { A->deep_gap = 0; j->st.dlook += A->last_deep; j->st.dask++; }
+        /* WOTR_TEACH_POL=1 (2026-11-19): a decision made by the teaching look-ahead also teaches the move-suggesting network the
+           look-ahead's preference among the moves it followed (the scores of those are comparable with one another). */
+        if (taught && g_teach_pol && n > 1 && A->last_deep && j->parena) {
+            float tg[MAXMOVES], z = 0;
+            for (int i = 0; i < n; i++) { tg[i] = !A->last_followed[i] ? 0 : expf((s.dplayer == FP ? A->last_val[i] - bv : bv - A->last_val[i]) / 0.08f); z += tg[i]; }
+            if (z > 0) { for (int i = 0; i < n; i++) tg[i] /= z; parena_push(j->parena, &A->rc.f, s.dplayer, s.dkind, A->last_mv, tg, n); }
+        }
         if (taught) { A->depth = g_deep[s.dplayer][0]; A->width = g_deep[s.dplayer][1]; A->replies = g_deep[s.dplayer][2]; A->narrow = g_deep[s.dplayer][3]; j->st.taught += n > 1; }
         if (n > 1) { j->st.tier[A->last_tier]++; j->st.searched++; j->st.explored += A->last_explored; j->st.explore_cost += A->last_explore_cost; }
         if (A->last_full && !taught) {      /* (a look-ahead decision mixes two kinds of score, so it gives no move-suggestion target) */
@@ -316,6 +324,7 @@ static void play_game(Job *j, uint64_t seed) {
             prev_reg = prev_grp == SP_BATTLE && s.b.dst < NREG && is_settlement(s.b.dst) ? s.b.dst : 255;
             if (s.turn < 42 && tv[s.turn] < 0) { tv[s.turn] = 1.0f / (1.0f + expf(-bv)); memcpy(ch[s.turn], s.ctrl, NREG); }
             if (keep[T]) feat_encode(&s, &feats[T]);
+            if (g_lambda > 0) { static _Thread_local Feat sf; float so[NOUT]; feat_encode(&s, &sf); nn_forward(A->net[s.dplayer], &sf, so); sv_at[T] = nn_prob(so[O_WIN]); }   /* the deciding side's own plain estimate of this position (no move bonuses, no best-move optimism) */
             phi_at[T] = feat_progress(&s, feat_rw);
             vpf_at[T] = (uint8_t)wotr_vp(&s, FP); vps_at[T] = (uint8_t)wotr_vp(&s, SH); corr_at[T] = s.corruption; left_at[T] = (uint8_t)(fsp_steps_to_mordor(&s) + (s.mordor < 0 ? 5 : 5 - s.mordor));
             if (keep[T]) { hits_at[T][FP] = s.stat_hits[FP]; hits_at[T][SH] = s.stat_hits[SH]; tiles_at[T] = s.stat_tiles; }
@@ -448,9 +457,18 @@ static void play_game(Job *j, uint64_t seed) {
         tgt[O_END + 0] = s.win_type == WIN_RING; tgt[O_END + 1] = s.win_type == WIN_CORRUPTION; tgt[O_END + 2] = s.win_type == WIN_SH_MIL; tgt[O_END + 3] = s.win_type == WIN_FP_MIL;
         tgt[O_MORDOR_COMP] = mordor_t ? mordor_comp / 7.0f : -100.0f;
         tgt[O_TILES_FP] = tiles_fp / 4.0f; tgt[O_TILES_SH] = tiles_sh / 4.0f; tgt[O_FPWAR] = fpwar / 5.0f; tgt[O_COMPDEAD] = dead / 7.0f;
+        /* WOTR_LAMBDA=<l> (2026-11-19, the TD-Gammon way): a position is taught not only who won but what the player thought of
+           the NEXT position: target(t) = (1 - l) x estimate at that side's next decision + l x that decision's target, the last one's target being
+           the result. l = 1 is the plain result (as without the switch); smaller l trusts the next estimate more. */
+        static _Thread_local float lam_at[MAXREC];
+        if (g_lambda > 0) {      /* the next estimate is taken from the SAME side's next decision (the other side may be a different, frozen player) */
+            float g[2] = {z, z}, nx[2] = {-1, -1};
+            for (int t = T - 1; t >= 0; t--) { int k = nets[t] & 1; if (nx[k] >= 0) g[k] = (1 - g_lambda) * nx[k] + g_lambda * g[k]; lam_at[t] = g[k]; nx[k] = sv_at[t]; }
+        }
         for (int t = T - 1; t >= 0; t--) {
             if (!keep[t]) continue;
             G = z + shaped[t]; G = G < 0 ? 0 : G > 1 ? 1 : G;
+            if (g_lambda > 0) G = lam_at[t];
             if (rt_at[t] >= 0) G = (1 - g_rteach[3]) * G + g_rteach[3] * rt_at[t];
             else if (dv_at[t] >= 0) G = (1 - g_teach_share) * G + g_teach_share * dv_at[t];
             else if (g_absorb > 0 && ab_at[t] >= 0) G = (1 - g_absorb) * G + g_absorb * ab_at[t];
@@ -885,6 +903,7 @@ static int cmd_train(int argc, char **argv) {
     if (getenv("WOTR_STARTS") && starts_load(getenv("WOTR_STARTS"))) { fprintf(stderr, "cannot read %s\n", getenv("WOTR_STARTS")); return 1; }
     if (getenv("WOTR_STATES") && states_load(getenv("WOTR_STATES"))) { fprintf(stderr, "cannot read %s\n", getenv("WOTR_STATES")); return 1; }
     if (getenv("WOTR_FLOOR")) g_floor = (float)atof(getenv("WOTR_FLOOR"));
+    if (getenv("WOTR_TEACH_POL")) g_teach_pol = atoi(getenv("WOTR_TEACH_POL"));
     if (getenv("WOTR_TEACH")) sscanf(getenv("WOTR_TEACH"), "%d,%d,%d,%f,%f", &g_teach[0], &g_teach[1], &g_teach[2], &g_teach_share, &g_teach_part);
     if (getenv("WOTR_SPEC_FADE")) g_spec_fade = (float)atof(getenv("WOTR_SPEC_FADE"));
     if (getenv("WOTR_SOON")) g_soon = (float)atof(getenv("WOTR_SOON"));
@@ -897,6 +916,7 @@ static int cmd_train(int argc, char **argv) {
     if (getenv("WOTR_AWLES_SH")) awles_load(SH, getenv("WOTR_AWLES_SH"));
     if (getenv("WOTR_AWLES_FP")) awles_load(FP, getenv("WOTR_AWLES_FP"));
     if (getenv("WOTR_LESSONS")) { char pth[600]; if (sscanf(getenv("WOTR_LESSONS"), "%599[^,],%f", pth, &g_les_share) == 2) g_nles = lessons_load(pth, &g_les, &g_les_lab); }
+    if (getenv("WOTR_LAMBDA")) g_lambda = (float)atof(getenv("WOTR_LAMBDA"));
     if (getenv("WOTR_ABSORB")) g_absorb = (float)atof(getenv("WOTR_ABSORB"));
     if (getenv("WOTR_DEEP_OPEN")) g_dopen = atoi(getenv("WOTR_DEEP_OPEN"));
     if (getenv("WOTR_DEEP_GAP")) g_dgap = (float)atof(getenv("WOTR_DEEP_GAP"));
