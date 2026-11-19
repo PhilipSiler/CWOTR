@@ -1,5 +1,18 @@
 # CWOTR — War of the Ring (2nd ed., base game) engine and self-play learner
 
+## Play your bot against it
+
+The [releases](../../releases) hold a ready-to-run package (Apple Silicon Macs): our referee with trained players for
+both sides. Your bot is spoken to in the [WotR Bot Protocol](https://github.com/behindmedia/wotr-protocol) draft 0.2 (base game) over its standard
+input and output; nothing goes over the network.
+
+```
+python3 cwotr_play.py --bot "<command that starts your bot>" --games 40 --seed 1001
+```
+
+The package's `README.txt` has the options, what plays, and how strong it is. To build the referee yourself: `make -C proto`
+(the trained players are only in the release).
+
 Everything that matters is C11; Python is only used to generate data tables and fetch logs.
 
 ## Layout
