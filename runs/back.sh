@@ -8,7 +8,8 @@
 # The folder runs/<name> is created on the first call and continued on later calls. After each stage: a snapshot
 # runs/<name>/stage<k>.* and 600 test games for each side against today's fixed players (appended to runs/<name>/sweep.out).
 #   ROUNDS (40)  rounds per stage      SHARE (0.7)  share of training games that start from a board
-#   TEACH (2)    stages up to this one also let rollouts make and teach a tenth of Shadow's decisions
+#   TEACH (off)  TEACH=<k>: stages up to k also let rollouts make and teach a tenth of Shadow's decisions (off by default:
+#                the recipe is tested plain first - no reward changes, no rollout teaching)
 #   FROM (shadow_aw6 + fp_aw7)  the players to start from: FROM_SH, FROM_FP
 cd /Users/philipsiler/Code/WOTR-RL/CWOTR
 n=$1; k0=$2; k1=$3; shift 3; d=runs/$n; B=data/ladder2022/back
@@ -35,7 +36,7 @@ random.seed(k); random.shuffle(old)
 open(out, 'w').write(''.join(cur + old[:len(cur)]))
 print('stage %d: %d boards of this stage + %d of earlier stages' % (k, len(cur), min(len(old), len(cur))))
 E
-  teach=""; [ $k -le ${TEACH:-2} ] && teach="WOTR_ROLL_LEAN=1 WOTR_ROLL_TEACH=100,8,0.1,0.5"
+  teach=""; [ $k -le ${TEACH:--1} ] && teach="WOTR_ROLL_LEAN=1 WOTR_ROLL_TEACH=100,8,0.1,0.5"
   env WOTR_TD=0 WOTR_EXACT=1,0 WOTR_EXEMPT=0,1 WOTR_FULL=0.04 WOTR_TEMP=0.06 WOTR_FLOOR=0.3 WOTR_W=12:0,18:0 WOTR_NUDGE=0.3 \
       WOTR_HUMAN_SH=0.1 WOTR_HUMAN_FP=0.1 WOTR_STARTS=$d/boards.txt WOTR_START_SHARE=${SHARE:-0.7} \
       WOTR_AWLES_SH=0.5,$(cat runs/keep/aw_shadow_files.txt) WOTR_AWLES_FP=0.5,$(cat runs/keep/aw_fp_files.txt) $teach "$@" \
