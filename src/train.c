@@ -1375,12 +1375,14 @@ static int kind2(Move m) {      /* 0 army move, 1 attack, 2 siege assault, 3 mus
 }
 static int cmd_awcmp(int argc, char **argv) {
     static const char *KN[11] = {"army move", "attack", "siege assault", "muster", "elite", "minion", "diplomacy", "draw", "play a card", "Nazgul", "other"};
+    int side = getenv("WOTR_IM_SIDE") && !strcmp(getenv("WOTR_IM_SIDE"), "FP") ? FP : SH;      /* WOTR_IM_SIDE=FP: AlphaWOTR's Free Peoples against ours */
+    if (side == FP) { KN[5] = "pass"; KN[9] = "Fellowship"; }
     enum { NB = 4 }; static const char *BN[NB] = {"turns 1-2", "turns 3-4", "turns 5-7", "turns 8+"};
     Player *pl = malloc(sizeof(Player));
     if (player_load(pl, argv[2])) { fprintf(stderr, "cannot load %s\n", argv[2]); return 1; }
     static Agent ag; memset(&ag, 0, sizeof ag);
     ag.net[FP] = &pl->fp; ag.net[SH] = &pl->sh; ag.samples = 3; ag.temp = 0; ag.rng = 12345;
-    ag.depth = g_deep[SH][0]; ag.width = g_deep[SH][1]; ag.replies = g_deep[SH][2]; ag.narrow = g_deep[SH][3]; ag.dpol[FP] = &pl->pol[FP]; ag.dpol[SH] = &pl->pol[SH];
+    ag.depth = g_deep[side][0]; ag.width = g_deep[side][1]; ag.replies = g_deep[side][2]; ag.narrow = g_deep[side][3]; ag.dpol[FP] = &pl->pol[FP]; ag.dpol[SH] = &pl->pol[SH];
     static long tot[NB], same[NB], ak[NB][11], ok[NB][11], inlist[NB], au[NB][3], ae[NB][3], an[NB][3], ou[NB][3], oe[NB][3], on[NB][3], ext[2], card[2], turns_seen[64], games = 0;
     static double gap[NB][11]; static long gapn[NB][11], atgt[NREG], otgt[NREG];
     static Move mv[MAXMOVES]; int prev_turn = 99, every = getenv("WOTR_EVERY") ? atoi(getenv("WOTR_EVERY")) : 1; long rec = 0;
@@ -1390,26 +1392,26 @@ static int cmd_awcmp(int argc, char **argv) {
         while (fread(&st, sizeof st, 1, f) == 1 && fread(&am, sizeof am, 1, f) == 1) {
             if (st.turn < prev_turn - 3) games++;
             prev_turn = st.turn;
-            if (st.dplayer != SH) continue;
+            if (st.dplayer != side) continue;
             if (st.dkind == D_SIEGE_EXTEND) { ext[0]++; ext[1] += am.a != 0; continue; }
             if (st.dkind == D_BATTLE_CARD) { card[0]++; card[1] += am.a < NCARD; continue; }
             if (st.dkind != D_ACTION) continue;
             if (st.turn < 64 && !turns_seen[st.turn]) turns_seen[st.turn] = 1;
-            int b = st.turn <= 2 ? 0 : st.turn <= 4 ? 1 : st.turn <= 7 ? 2 : 3, a = kind2(am);
+            int b = st.turn <= 2 ? 0 : st.turn <= 4 ? 1 : st.turn <= 7 ? 2 : 3, a = kind2(am); if (side == FP) a = am.type == M_PASS ? 5 : am.type == M_FSP_MOVE || am.type == M_FSP_HIDE ? 9 : a;
             tot[b]++; ak[b][a]++;
             if (a == 1 || a == 2) { int x = a - 1; an[b][x]++; au[b][x] += am.c + am.d; ae[b][x] += am.d; if (st.turn <= 4) atgt[am.b]++; }
             if (rec++ % every) continue;
             int n = wotr_moves(&st, mv), ai = -1;
             for (int i = 0; i < n; i++) if (mv[i].type == am.type && mv[i].a == am.a && mv[i].b == am.b && (ai < 0 || (mv[i].c == am.c && mv[i].d == am.d))) ai = i;
             float bv; int nn; Move m = agent_choose(&ag, &st, &bv, &nn);
-            int o = kind2(m), oi = -1; for (int i = 0; i < n; i++) if (!memcmp(&mv[i], &m, sizeof m)) oi = i;
+            int o = kind2(m), oi = -1; if (side == FP) o = m.type == M_PASS ? 5 : m.type == M_FSP_MOVE || m.type == M_FSP_HIDE ? 9 : o; for (int i = 0; i < n; i++) if (!memcmp(&mv[i], &m, sizeof m)) oi = i;
             ok[b][o]++; same[b] += m.type == am.type && m.a == am.a && m.b == am.b;
             if (o == 1 || o == 2) { int x = o - 1; on[b][x]++; ou[b][x] += m.c + m.d; oe[b][x] += m.d; if (st.turn <= 4) otgt[m.b]++; }
-            if (ai >= 0) { inlist[b]++; if (oi >= 0 && ag.last_val[ai] > -900 && ag.last_val[ai] < 900) { gap[b][a] += ag.last_val[ai] - ag.last_val[oi]; gapn[b][a]++; } }
+            if (ai >= 0) { inlist[b]++; if (oi >= 0 && ag.last_val[ai] > -900 && ag.last_val[ai] < 900) { gap[b][a] += side == SH ? ag.last_val[ai] - ag.last_val[oi] : ag.last_val[oi] - ag.last_val[ai]; gapn[b][a]++; } }
         }
         fclose(f);
     }
-    printf("AlphaWOTR's Shadow: %ld games; our Shadow %s asked in every %d%s of its action positions\n", games, argv[2], every, every == 1 ? "st" : "th");
+    printf("AlphaWOTR's %s: %ld games; ours, %s, asked in every %d%s of its action positions\n", side == FP ? "Free Peoples" : "Shadow", games, argv[2], every, every == 1 ? "st" : "th");
     for (int b = 0; b < NB; b++) {
         long os = 0; for (int k = 0; k < 11; k++) os += ok[b][k];
         if (!tot[b] || !os) continue;

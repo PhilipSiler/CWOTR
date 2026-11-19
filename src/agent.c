@@ -270,6 +270,7 @@ static float lane_guard(const State *s, Move m, int n) {
    Everything between two action decisions (second army moves, casualties, card choices) is settled by its owner's
    first choice. `q` is each option's one-step score from its owner's side, nudges included. */
 static float deep(Agent *a, const State *from, int pov, int d, int turn0, int own);
+static float pass_d = -2;
 static _Thread_local int in_rollout; static int roll_lean = -1;   /* WOTR_ROLL_LEAN=1: inside a rollout both sides' choices get their lean toward the move-suggester too */
 static int rank_moves(Agent *a, const State *t, const Move *mv, int n, float *q, int pov, int nar) {      /* returns the index of the best option for the side to decide */
     int who = t->dplayer, bi = -1; float al = a->net[who]->p.alpha;
@@ -500,10 +501,11 @@ Move agent_choose(Agent *a, const State *s, float *best_v, int *n_moves) {
        the probability the move-suggesting network gives it (floored at -6): with a network taught from human moves
        (`wotr imitate`) this leans the choice toward what human players do, a learned stand-in for the strategy formula. */
     static _Thread_local float hum[MAXMOVES]; int use_hum = 0;
-    static float hum_early; static int hum_early_turns;
+    static float hum_early; static int hum_early_turns; static float hum_early_fp; static int hum_early_fp_turns;
     {   /* WOTR_HUMAN_FP / WOTR_HUMAN_SH are read here, once, so that training games and the referee's bridge get the lean too */
         static int read; if (!read) { const char *v; if ((v = getenv("WOTR_HUMAN_FP")) && agent_hum[FP] == 0) agent_hum[FP] = (float)atof(v); if ((v = getenv("WOTR_HUMAN_SH")) && agent_hum[SH] == 0) agent_hum[SH] = (float)atof(v);
-            if ((v = getenv("WOTR_HUMAN_EARLY"))) sscanf(v, "%f,%d", &hum_early, &hum_early_turns);   /* Shadow's lean is <w> instead on turns up to <turns> */
+            if ((v = getenv("WOTR_HUMAN_EARLY"))) sscanf(v, "%f,%d", &hum_early, &hum_early_turns);
+            if ((v = getenv("WOTR_HUMAN_EARLY_FP"))) sscanf(v, "%f,%d", &hum_early_fp, &hum_early_fp_turns);   /* the same for the Free Peoples */   /* Shadow's lean is <w> instead on turns up to <turns> */
             read = 1; }
     }
     if (agent_hum[pov] > 0 && s->dkind == D_ACTION && a->dpol[pov] && !set) {
@@ -513,7 +515,7 @@ Move agent_choose(Agent *a, const State *s, float *best_v, int *n_moves) {
         for (int i = 0; i < n; i++) if (hum[i] > mx) mx = hum[i];
         for (int i = 0; i < n; i++) z += expf(hum[i] - mx);
         z = logf(z);
-        float w = pov == SH && s->turn <= hum_early_turns ? hum_early : agent_hum[pov];
+        float w = pov == SH && s->turn <= hum_early_turns ? hum_early : pov == FP && s->turn <= hum_early_fp_turns ? hum_early_fp : agent_hum[pov];
         for (int i = 0; i < n; i++) { float lp = hum[i] - mx - z; if (lp < -6) lp = -6; hum[i] = (pov == FP ? 1 : -1) * w * lp; }
         use_hum = 1;
     }
@@ -540,6 +542,19 @@ Move agent_choose(Agent *a, const State *s, float *best_v, int *n_moves) {
         val[i] = eval_move(a, &det, mv[i], pov, 0, seed, a->samples) + nudge_share(a->vnet[pov]->p.alpha) * lane_guard(s, mv[i], n);
         if (use_hum) val[i] += hum[i];
         if (bi < 0 || (pov == FP ? val[i] > best : val[i] < best)) { best = val[i]; bi = i; }
+    }
+    /* WOTR_PASS=<d> (2026-11-18): a pass keeps the die for later in the turn, which a one-step score cannot see - it scores
+       the pass as if the action were given up (0.34 log-odds below our choice, where AlphaWOTR's Free Peoples pass a fifth
+       of their early decisions). With this set, a pass is worth what the best other move is worth, less d. */
+    if (pass_d < -1) pass_d = getenv("WOTR_PASS") ? (float)atof(getenv("WOTR_PASS")) : -1;
+    if (pass_d >= 0 && s->dkind == D_ACTION && !set) {
+        int pi = -1, bo = -1;
+        for (int i = 0; i < n; i++) { if (!cand[i]) continue; if (mv[i].type == M_PASS) pi = i; else if (bo < 0 || (pov == FP ? val[i] - (use_hum ? hum[i] : 0) > val[bo] - (use_hum ? hum[bo] : 0) : val[i] - (use_hum ? hum[i] : 0) < val[bo] - (use_hum ? hum[bo] : 0))) bo = i; }
+        if (pi >= 0 && bo >= 0) {
+            val[pi] = val[bo] - (use_hum ? hum[bo] : 0) + (pov == FP ? -pass_d : pass_d) + (use_hum ? hum[pi] : 0);
+            bi = -1; for (int i = 0; i < n; i++) if (cand[i] && (bi < 0 || (pov == FP ? val[i] > val[bi] : val[i] < val[bi]))) bi = i;
+            best = val[bi];
+        }
     }
     int rolled = 0;
     if ((a->roll_ms > 0 || a->roll_n > 0) && s->dkind == D_ACTION && !set) {
