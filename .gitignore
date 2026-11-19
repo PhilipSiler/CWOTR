@@ -35,3 +35,6 @@ __pycache__/
 .env
 *.token
 .DS_Store
+
+# --- packaged builds for release (binaries and trained players)
+/dist/

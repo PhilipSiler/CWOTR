@@ -18,6 +18,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 /* ================= JSON reader ================= */
 enum { J_NULL, J_BOOL, J_NUM, J_STR, J_ARR, J_OBJ };
@@ -408,7 +409,10 @@ typedef struct {
     int next_id, seq, clock_ms;
     char game[40];
     long asked, illegal;
+    double ms_sum[2], ms_max[2]; long ms_n[2];      /* thinking time per decision: [0] our player, [1] the outside bot */
 } Ref;
+static double ref_now(void) { struct timespec ts; clock_gettime(CLOCK_MONOTONIC, &ts); return ts.tv_sec * 1e3 + ts.tv_nsec / 1e6; }
+static void ref_time(Ref *R, int who, double t0) { double ms = ref_now() - t0; R->ms_sum[who] += ms; R->ms_n[who]++; if (ms > R->ms_max[who]) R->ms_max[who] = ms; }
 
 static const char *comp_key(const State *s, int c) {
     if (c == C_GANDALF && s->gandalf_white) return CHAR_KEY[CH_GANDALF_WHITE];
@@ -896,6 +900,7 @@ static int ask(Ref *R, int kind, char **text, int n) {
     bput(&b, "},\"view\":"); view_json(&b, R, side);
     bput(&b, ",\"clock\":{\"left_ms\":%d}}", R->clock_ms);
     send_line(b.p);
+    double t0 = ref_now();
     for (;;) {
         char *line = read_line(), *mem;
         if (!line) { fprintf(stderr, "the outside bot closed the connection\n"); exit(3); }
@@ -911,7 +916,7 @@ static int ask(Ref *R, int kind, char **text, int n) {
             choice = o && o->type == J_NUM && o->num >= 0 && o->num < n ? (int)o->num : -1;
         }
         free(mem);
-        if (choice >= 0) return choice;
+        if (choice >= 0) { ref_time(R, 1, t0); return choice; }
         if (choice == -1) {         /* not one of the options: the first option is played and the slip is counted */
             R->illegal++;
             fprintf(stderr, "ILLEGAL answer from the outside bot to %s; option 0 played\n", KIND_KEY[kind]);
@@ -1006,7 +1011,9 @@ static int play_game(Ref *R, Agent *ag, uint64_t seed, int verbose) {
             wotr_prune = 1;
             State c = *s; float bv; int n;
             wotr_determinize(&c, side, R->rng += 0x1234567);       /* our player sees only what its side may know */
+            double t0 = ref_now();
             first = agent_choose(ag, &c, &bv, &n);
+            if (n > 1) ref_time(R, 0, t0);
             wotr_move_str(s, first, buf, sizeof buf);
             if (verbose && n > 1) fprintf(stderr, "%s  %s   (chance the Free Peoples win: %.0f%%)\n", side ? "  SH" : "FP  ", buf, 100 * nn_prob(bv));
             if (getenv("WOTR_DECISIONS_FILE")) decision_dump(getenv("WOTR_DECISIONS_FILE"), s, first, seed, 0);
@@ -1044,6 +1051,8 @@ static int cmd_referee(int argc, char **argv, int mock) {
     if (!p || player_load(p, argv[2])) { fprintf(stderr, "cannot load the player %s\n", argv[2]); return 1; }
     memset(&ag, 0, sizeof ag);
     ag.net[FP] = &p->fp; ag.net[SH] = &p->sh; ag.samples = 3; ag.temp = 0.02f;
+    ag.dpol[FP] = &p->pol[FP]; ag.dpol[SH] = &p->pol[SH];     /* always: the lean toward the move-suggester (WOTR_HUMAN_FP/SH) needs it. Until 2026-11-19 it was
+                                                                 set only with look-ahead or rollouts, so a player without them played WITHOUT its lean. */
     if (getenv("WOTR_LOOKAHEAD")) {   /* the player's own look-ahead, set as the training session measures it */
         ag.depth = 3; ag.width = 4; ag.replies = 1; ag.narrow = 6; ag.taper = 0;
         ag.dpol[FP] = &p->pol[FP]; ag.dpol[SH] = &p->pol[SH];
@@ -1114,8 +1123,9 @@ static int cmd_referee(int argc, char **argv, int mock) {
     else snprintf(msg, sizeof msg, "{\"type\":\"game_over\",\"game\":\"%s\",\"winner\":\"%s\",\"how\":\"%s\",\"turn\":%d}", R.game, SIDE_KEY[s->winner - 1], how_key(s), s->turn);
     send_line(msg);
     send_line("{\"type\":\"quit\"}");
-    fprintf(stderr, "RESULT game=%s outside_bot=%s outside_side=%s winner=%s how=%s turn=%d questions=%ld illegal_answers=%ld failed_checks=%d fp_vp=%d sh_vp=%d corruption=%d\n",
-            R.game, botname, SIDE_KEY[R.ext], s->win_type == WIN_NONE ? "none" : SIDE_KEY[s->winner - 1], how_key(s), s->turn, R.asked, R.illegal, bad, wotr_vp(s, FP), wotr_vp(s, SH), s->corruption);
+    fprintf(stderr, "RESULT game=%s outside_bot=%s outside_side=%s winner=%s how=%s turn=%d questions=%ld illegal_answers=%ld failed_checks=%d fp_vp=%d sh_vp=%d corruption=%d our_ms_avg=%.0f our_ms_max=%.0f bot_ms_avg=%.0f bot_ms_max=%.0f\n",
+            R.game, botname, SIDE_KEY[R.ext], s->win_type == WIN_NONE ? "none" : SIDE_KEY[s->winner - 1], how_key(s), s->turn, R.asked, R.illegal, bad, wotr_vp(s, FP), wotr_vp(s, SH), s->corruption,
+            R.ms_n[0] ? R.ms_sum[0] / R.ms_n[0] : 0, R.ms_max[0], R.ms_n[1] ? R.ms_sum[1] / R.ms_n[1] : 0, R.ms_max[1]);
     return 0;
 }
 
@@ -1283,8 +1293,13 @@ int main(int argc, char **argv) {
     names_init();
     if (argc >= 3 && !strcmp(argv[1], "names")) return test_json() | test_names(argv[2]);
     if (argc >= 5 && !strcmp(argv[1], "referee")) return cmd_referee(argc, argv, 0);
+    if (argc >= 5 && !strcmp(argv[1], "play")) {       /* the referee with the settings our players were measured at (anything already set in the environment stays) */
+        setenv("WOTR_W", "12:0,18:0", 0); setenv("WOTR_NUDGE", "0.3", 0); setenv("WOTR_HUMAN_SH", "0.1", 0); setenv("WOTR_HUMAN_FP", "0.1", 0);
+        if (!strcmp(argv[3], "fp")) setenv("WOTR_LOOKAHEAD", "1", 0);      /* our Shadow looks ahead; our Free Peoples play one step ahead */
+        return cmd_referee(argc, argv, 0);
+    }
     if (argc >= 5 && !strcmp(argv[1], "mock")) return cmd_referee(argc, argv, 1);
     if (argc >= 4 && !strcmp(argv[1], "replay")) return cmd_replay(argc, argv);
-    fprintf(stderr, "usage: bridge names <vocabulary.json>\n       bridge referee <player|prior> <fp|sh: the outside bot's side> <seed> [clock ms=10000] [sims]\n       bridge mock <player|prior> <games> <seed>\n       bridge replay <referee log> <out file> [outside|ours|all]\n");
+    fprintf(stderr, "usage: bridge names <vocabulary.json>\n       bridge play <player> <fp|sh: the outside bot's side> <seed> [clock ms=10000]   (referee, with the measured settings)\n       bridge referee <player|prior> <fp|sh: the outside bot's side> <seed> [clock ms=10000] [sims]\n       bridge mock <player|prior> <games> <seed>\n       bridge replay <referee log> <out file> [outside|ours|all]\n");
     return 2;
 }

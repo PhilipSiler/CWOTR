@@ -1,0 +1,14 @@
+
+2026-11-19 01:10 AlphaWOTR (1 s) 20+20, new recipe players (games started from human end boards), bridge rebuilt from src 00:54, no rollouts:
+  Shadow runs/bk3c/s25 (HUMAN_SH=0.1, look-ahead), seeds 1001-1039: won 14/20, all corruption (turns 9-16), 0 conquest; lost 6 to the Ring.
+    Same seeds shadow_aw3: 9/20 (5 conquest, 4 corruption). Shadow points after turn 8: 2.05 (barely attacks).
+  FP runs/bk3c/latest (HUMAN_FP=0.1), seeds 1002-1040: won 0/20; lost 17 to conquest (turns 6-11), 3 to corruption.
+    Same seeds fp_aw4: 6/20.
+  Folders: proto/games/alpha2-1s-bk3c_s25-shadow20, alpha2-1s-bk3c_latest-fp20 (decision dumps included).
+
+2026-11-19 09:30 AlphaWOTR (1 s) 40+40, same seeds as the 11-18 evening batches, bridge of 00:54 (src unchanged), no rollouts, lean 0.1:
+  Shadow keep/shadow_hunter1 (= bk3c/s25, look-ahead): won 23/40, all corruption (turns 9-14), 0 conquest; lost 12 Ring, 5 FP conquest.
+    Shadow points after turns 4/6/8/10: 0.10/1.10/1.97/2.58. Mark shadow_aw3 17/40 (10 conquest). AlphaWOTR error defaults 3.
+  FP keep/fp_aw7: won 5/40 (all Ring); lost 25 conquest (turns 7-16), 10 corruption. Mark fp_aw4 11/40.
+    Minas Tirith fell in 32/40, turn 3.9 on average. AlphaWOTR error defaults 0.
+  Folders: proto/games/alpha2-1s-shadow_hunter1-shadow40, alpha2-1s-fp_aw7-fp40 (decision dumps included).
