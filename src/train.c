@@ -1048,6 +1048,7 @@ static int cmd_eval(int argc, char **argv) {
     /* WOTR_ALPHA_FP / WOTR_ALPHA_SH=<x>: play that seat's player with this share of the strategy formula instead of the one
        it was saved with (a measurement of how much of its play is the formula and how much the network) */
     if (getenv("WOTR_STATES")) { if (states_load(getenv("WOTR_STATES"))) { fprintf(stderr, "cannot read %s\n", getenv("WOTR_STATES")); return 1; } g_eval_starts = 1; }
+    if (getenv("WOTR_STARTS")) { if (starts_load(getenv("WOTR_STARTS"))) { fprintf(stderr, "cannot read %s\n", getenv("WOTR_STARTS")); return 1; } g_eval_starts = 1; }   /* test games from human boards (the backward sweep is judged from its own stage's boards) */
     if (getenv("WOTR_ALPHA_FP")) a->fp.p.alpha = a->sh.p.alpha = (float)atof(getenv("WOTR_ALPHA_FP"));
     if (getenv("WOTR_ALPHA_SH")) b->fp.p.alpha = b->sh.p.alpha = (float)atof(getenv("WOTR_ALPHA_SH"));
     if (getenv("WOTR_HUMAN_FP")) agent_hum[FP] = (float)atof(getenv("WOTR_HUMAN_FP"));
