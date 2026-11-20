@@ -51,6 +51,17 @@ enum {
     D_SELF_HITS, D_HUNT_RESPONSE, D_REVEAL_DEST, D_MITHRIL, D_STAFF,
     D_CARD_REGION, D_CARD_OPTION, D_CARD_NATION, D_CARD_CARD, D_CARD_COMP, D_CARD_ARMY, ND
 };
+/* the questions of D_CARD_OPTION added to ask what the official texts leave to a player (State.qtag) */
+enum { Q_NONE, Q_WORDS_OF_POWER, Q_BLADE, Q_FATEFUL_STRIKE, Q_HEROIC_DEATH, Q_BLACK_BREATH, Q_WORN_WITH_SORROW, Q_NAZGUL_STRIKE, Q_BCC_NAZGUL, Q_BCC_ARMY, Q_BCC_ATTACK, Q_LURE, Q_EXCESS, Q_FLOCKS, Q_BALROG, Q_WHITE_RIDER, Q_DRAW_DECK };
+/* D_FSP_DECLARE: one question for the whole Fellowship phase, in any order (RB p. 16): 255 ends it, a region declares
+   the Fellowship there, FSP_GUIDE + c makes Companion c the Guide, FSP_MORDOR enters Mordor */
+#define FSP_GUIDE 200
+#define FSP_MORDOR 199
+#define Q_HAND 254      /* option: a random card from the hand */
+#define Q_HUNT 253      /* option: roll for the Hunt */
+#define Q_LEADER 100    /* option: a Leader of nation (Q_LEADER + nation) */
+#define Q_MINION 20     /* option: a Minion (Q_MINION + minion) */
+#define Q_NAZGUL 50     /* option: a Nazgul */
 /* move types */
 enum {
     M_CHOICE,       /* a = option value (generic decisions) */
@@ -98,6 +109,10 @@ typedef struct {
     uint8_t forfeit[2];             /* leadership forfeited this round */
     uint8_t wop_comp;               /* Words of Power target companion or 255 */
     uint8_t reroll_hits[2];
+    /* rules as the official texts have them (see the pull request for the texts) */
+    uint8_t sorc;                   /* the Witch-king's Sorcerer draw due (deck + 1), drawn when round 1 is over */
+    uint8_t dd;                     /* Daring Defiance cancelled the Shadow card: every Companion forfeits his Leadership */
+    uint8_t pre_sh_hits;            /* Shadow pre-combat hits this round (Durin's Bane), for Mumakil's count */
 } Battle;
 
 typedef struct State {
@@ -148,11 +163,18 @@ typedef struct State {
     uint16_t stat_hits[2];           /* combat hits absorbed by each side's units so far (regular 1, elite reduced 1, elite removed 2) */
     uint8_t stat_tiles;              /* Hunt tiles drawn so far */
     uint8_t stat_vp_walk[2], stat_vp_fight[2];   /* enemy VP taken by walking into an empty settlement / by battle or siege (never decremented) */
+    uint8_t mithril_tile, mithril_frame;   /* Mithril Coat and Sting: the first tile (+1) held out of the pool until the Hunt of frame mithril_frame ends */
+    uint8_t hunt_drawn;              /* the tile a HF_DRAW_ONLY Hunt drew (255: none, e.g. Wizard's Staff) */
+    uint8_t naz_moved[NREG];         /* Nazgul that have moved into each region in this action: each Nazgul moves once, the others may still go */
+    uint8_t naz_only;               /* a card moves "the Nazgul" (the Witch-king among them): not the Mouth of Sauron */
+    uint8_t qreg;                    /* the region a Q_EXCESS question is about */
+    uint8_t qtag;                    /* which question a generic D_CARD_OPTION is (Q_*: written for the protocol by bridge.c) */
 } State;
 
 /* 1 (default): structure-aware generation that drops moves with no purpose (see movegen.c).
  * 0: every legal move the engine models -- used by rules tests and log replay. */
 extern int wotr_prune;
+extern int wotr_turn_cap;         /* the game stops as a draw after this many turns (30; the protocol bridge sets 200) */
 
 /* ---- public API ---- */
 void wotr_global_init(void);
@@ -265,7 +287,7 @@ void push_reveal(State *s);
 void enter_special_tile(State *s, int t);
 int  draw_tile(State *s);
 enum { HM_ROLL, HM_MORDOR, HM_CARD, HM_STRONGHOLD };
-enum { HF_NO_REDUCE = 1, HF_RANDOM_FIRST = 2, HF_IGNORE_REVEAL = 4, HF_EYE_DISCARD = 8 };
+enum { HF_NO_REDUCE = 1, HF_RANDOM_FIRST = 2, HF_IGNORE_REVEAL = 4, HF_EYE_DISCARD = 8, HF_DRAW_ONLY = 16 };   /* DRAW_ONLY: the tile only, in hunt_drawn (Wizard's Staff and Mithril offered) */
 /* battle.c */
 void fr_battle(State *, Frame *); void fr_round(State *, Frame *); void fr_casualty(State *, Frame *);
 void push_battle(State *s, int side, int src, int dst, int nr, int ne);

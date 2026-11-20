@@ -104,6 +104,9 @@ int wotr_check(const State *s, char *err, int n) {
         }
         have = 1;
     }
+    /* recruiting may exceed the stacking limit until the action ends, when the owner removes the excess (RB p. 26-27):
+       the limits hold between actions and phases */
+    int between = s->dkind == D_ACTION || s->dkind == D_FSP_DECLARE || s->dkind == D_HUNT_ALLOC;
     int nz = s->pool_naz, hn[2] = {0, 0};
     for (int k = 0; k < NNAT; k++) {
         int a = s->pool_reg[k], e = s->pool_eli[k];
@@ -122,9 +125,9 @@ int wotr_check(const State *s, char *err, int n) {
         if (s->siege[r]) {
             if (REGION[r].settle != S_STRONGHOLD) FAIL("siege outside stronghold %s", REGION[r].name);
             if (!fu || !su) FAIL("siege with a side missing in %s", REGION[r].name);
-            if (units(s, s->ctrl[r], r) > 5) FAIL("more than 5 besieged in %s", REGION[r].name);
+            if (units(s, s->ctrl[r], r) > 5 && between) FAIL("more than 5 besieged in %s", REGION[r].name);
         }
-        if (fu > 10 || su > 10) FAIL("stacking in %s (%d/%d)", REGION[r].name, fu, su);
+        if ((fu > 10 || su > 10) && between) FAIL("stacking in %s (%d/%d)", REGION[r].name, fu, su);
         if (fp_leaders(s, r) && !fu) FAIL("FP leaders without army in %s", REGION[r].name);
         if (is_settlement(r) && s->ctrl[r] > 1) FAIL("bad ctrl in %s", REGION[r].name);
         if (is_settlement(r) && !s->siege[r] && units(s, 1 - s->ctrl[r], r)) FAIL("enemy army sits in unconquered %s", REGION[r].name);

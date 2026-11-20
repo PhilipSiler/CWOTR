@@ -156,7 +156,7 @@ int gen_muster(const State *s, int side, Move proto, int exclude, Move *out) {
         if (!is_settlement(r) || nat == NO_NATION || NAT_SIDE(nat) != side || !at_war(s, nat)) continue;
         if (s->ctrl[r] != side || s->siege[r] || units(s, 1 - side, r) || r == exclude) continue;
         Move m = proto; m.a = (uint8_t)r;
-        if (s->pool_reg[nat] && units(s, side, r) < 10) { m.b = 0; out[n++] = m; }
+        if (s->pool_reg[nat]) { m.b = 0; out[n++] = m; }    /* even into a full region (RB p. 26-27) */
         if (side == FP && s->pool_ldr[nat] && units(s, FP, r)) { m.b = 1; out[n++] = m; }
         if (nat == SAURON && REGION[r].settle == S_STRONGHOLD && s->pool_naz) { m.b = 1; out[n++] = m; }
     }
@@ -296,7 +296,7 @@ void apply_naz_plan(State *s, Move m) {
     if (t1 < NREG) {
         if (s->minion_loc[M_WK] < NREG) s->minion_loc[M_WK] = (uint8_t)t1;
         int mo = s->minion_loc[M_MOUTH];
-        if (mo < NREG && DIST[mo][t1] <= 3 && !(s->siege[mo] && s->ctrl[mo] == SH)) s->minion_loc[M_MOUTH] = (uint8_t)t1;
+        if (!s->naz_only && mo < NREG && DIST[mo][t1] <= 3 && !(s->siege[mo] && s->ctrl[mo] == SH)) s->minion_loc[M_MOUTH] = (uint8_t)t1;
     }
     for (int k = 0; k < 2; k++) {
         int t = k ? t2 : t1;
@@ -334,16 +334,18 @@ static int gen_naz_chain(const State *s, Move *out) {
        that no Shadow army besieges (rulebook p.24) */
     for (int r = 0; r < NREG; r++) if (!(REGION[r].settle == S_STRONGHOLD && s->ctrl[r] == FP && !s->siege[r])) dest[nd++] = (uint8_t)r;
     for (int src = 0; src < NREG; src++) {
-        if (!s->naz[src] || locked(s, src)) continue;
+        int avail = s->naz[src] - s->naz_moved[src];          /* each Nazgul moves once */
+        if (avail <= 0) continue;
         for (int i = 0; i < nd && n < MAXMOVES - 8; i++) {
             if (dest[i] == src) continue;
             Move m = {M_NAZ_MOVE, 0, (uint8_t)src, dest[i], 1, 0, 0, 0};
             out[n++] = m;
-            if (s->naz[src] > 1) { m.c = s->naz[src]; out[n++] = m; }
+            if (avail > 1) { m.c = (uint8_t)avail; out[n++] = m; }
         }
     }
     for (int k = 0; k < 2; k++) {
         int mi = k ? M_MOUTH : M_WK, src = s->minion_loc[mi];
+        if (mi == M_MOUTH && s->naz_only) continue;        /* "Move any or all of the Nazgul": not the Mouth */
         if (src >= NREG || ((s->comp_moved >> k) & 1)) continue;
         if (mi == M_MOUTH && s->siege[src] && s->ctrl[src] == SH) continue;
         uint8_t reach[NREG];        /* the Mouth walks: up to three regions, never through a Stronghold he may not enter */
@@ -457,7 +459,7 @@ int gen_action(const State *s, Move *out) {
         for (int r = 0; r < NREG; r++) {
             int nat = REGION[r].nation;
             if (!is_settlement(r) || nat == NO_NATION || NAT_SIDE(nat) != side || !at_war(s, nat)) continue;
-            if (s->ctrl[r] != side || s->siege[r] || units(s, 1 - side, r) || !s->pool_eli[nat] || units(s, side, r) >= 10) continue;
+            if (s->ctrl[r] != side || s->siege[r] || units(s, 1 - side, r) || !s->pool_eli[nat]) continue;
             m = z; m.type = M_MUSTER_ELITE; m.die = (uint8_t)pm; m.a = (uint8_t)r; out[n++] = m;
         }
     }
@@ -474,12 +476,15 @@ int gen_action(const State *s, Move *out) {
         if (pc >= 0) {
             if (!s->revealed && (s->mordor >= 0 || s->progress < 12)) { m = z; m.type = M_FSP_MOVE; m.die = (uint8_t)pc; out[n++] = m; }
             if (fc && s->mordor < 0) {
-                for (int a = 0; a < NCOMP; a++) {
-                    if (!((fc >> a) & 1)) continue;
-                    m = z; m.type = M_SEPARATE; m.die = (uint8_t)pc; m.a = (uint8_t)(1 << a); out[n++] = m;
-                    if (!wotr_prune) for (int b = a + 1; b < NCOMP; b++) if ((fc >> b) & 1) { m.a = (uint8_t)((1 << a) | (1 << b)); out[n++] = m; }
+                if (!wotr_prune) {      /* any group of the Companions may separate (RB p. 34): every one, when following a player */
+                    for (unsigned g = 1; g < 256 && n < MAXMOVES - 64; g++) if (!(g & ~(unsigned)fc)) { m = z; m.type = M_SEPARATE; m.die = (uint8_t)pc; m.a = (uint8_t)g; out[n++] = m; }
+                } else {
+                    for (int a = 0; a < NCOMP; a++) {
+                        if (!((fc >> a) & 1)) continue;
+                        m = z; m.type = M_SEPARATE; m.die = (uint8_t)pc; m.a = (uint8_t)(1 << a); out[n++] = m;
+                    }
+                    if (__builtin_popcount((unsigned)fc) > 2) { m = z; m.type = M_SEPARATE; m.die = (uint8_t)pc; m.a = (uint8_t)fc; out[n++] = m; }
                 }
-                if (__builtin_popcount((unsigned)fc) > 2) { m = z; m.type = M_SEPARATE; m.die = (uint8_t)pc; m.a = (uint8_t)fc; out[n++] = m; }
             }
             for (int c = 0; c < NCOMP; c++) if (s->comp_loc[c] < NREG) { m = z; m.type = M_COMPS; m.die = (uint8_t)pc; out[n++] = m; break; }
         }

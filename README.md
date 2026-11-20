@@ -118,17 +118,22 @@ Average branching drops from about 89 to 30 moves per decision.
 * Army splits come from a small menu (all / all but one / one unit / half); leaders move all-or-none.
   `wotr_apply` accepts any unit counts, only the generator is restricted.
 * Attack rearguard is none or one unit; leaders and characters always join the attack.
-* Card-driven army moves relocate the whole army. Rage of the Dunlendings skips its optional move.
+* Card-driven army moves relocate the whole army (with `wotr_prune = 0` *Shadows Gather* / *The Shadow Lengthens*
+  offer a destination where only a part would fit; the split is then the caller's).
 * Nazgul destinations are limited to frontline Shadow armies and the Fellowship's region.
-* Companions separate as singles, pairs or all together.
+* Companions separate as singles or all together (`wotr_prune = 0`: any group).
 * The cheapest sufficient action die pays for an action.
-* Auto-resolved minor choices: The White Rider, Words of Power target, Heroic Death, Black Breath,
-  Blade of Westernesse, Fateful Strike, Dread and Despair amount, Mighty Attack / Anduril, Elite-over-Regular
-  for card recruits, Flocks of Crebain, Balrog of Moria, Worn with Sorrow and Toil, Stormcrow's casualty,
-  the cards paid to discard A Power too Great, mid-turn Guide replacement.
-* A game not decided after 30 turns is a draw.
-* Moves that would overfill a region (more than ten units) are not offered; a card that moves an army cannot split it,
-  so *The Shadow Lengthens* / *Shadows Gather* are unplayable when only a split would fit.
+* Auto-resolved minor choices: Mighty Attack / Anduril, Elite-over-Regular for card recruits, Stormcrow's casualty,
+  the cards paid to discard A Power too Great, a new Guide during the turn (the strongest Companion; in the Fellowship
+  phase the Guide is the player's answer).
+* Army moves that would overfill a region (more than ten units) are not offered. Recruiting may overfill one; the
+  owner then removes the excess when the action ends (RB p. 26-27).
+
+The player's other choices are asked with the generic option question (`D_CARD_OPTION`, `State.qtag` naming it):
+The White Rider, Words of Power, Heroic Death, Black Breath, Blade of Westernesse, Fateful Strike, Dread and Despair,
+Flocks of Crebain, Balrog of Moria, Worn with Sorrow and Toil, The Nazgul Strike, Lure of the Ring, The Black Captain
+Commands' and The Ringwraiths Are Abroad's choices, the excess units; the Guide on a tie and entering Mordor are
+answers of the Fellowship phase's one question (`FSP_GUIDE + c`, `FSP_MORDOR`). There is no turn limit.
 
 ## Checking the legal-move list against an independent engine
 

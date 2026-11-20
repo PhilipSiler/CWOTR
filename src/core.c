@@ -246,8 +246,7 @@ void wipe_leaders(State *s, int side, int r, int kill_chars) {
     }
 }
 int recruit(State *s, int r, int n, int elite) {
-    int side = NAT_SIDE(n);
-    if (units(s, side, r) >= ((s->siege[r] && s->ctrl[r] == side) ? 5 : 10)) return 0;
+    /* recruitment may exceed the stacking limit: the owner removes the excess at the end of the action (RB p. 26-27) */
     if (elite) { if (!s->pool_eli[n]) return 0; s->pool_eli[n]--; s->eli[r][n]++; }
     else { if (!s->pool_reg[n]) return 0; s->pool_reg[n]--; s->reg[r][n]++; }
     return 1;
