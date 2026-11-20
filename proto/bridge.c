@@ -2191,8 +2191,8 @@ static int cmd_bot(int argc, char **argv) {
         if (!type) { free(mem); continue; }
         if (!strcmp(type, "hello")) {
             const char *tok = getenv("WOTR_BOT_TOKEN");
-            if (tok) snprintf(out, sizeof out, "{\"type\":\"hello\",\"id\":%d,\"protocol\":\"wotr-bot/0.2\",\"name\":\"CWOTR\",\"version\":\"0.4\",\"events\":false,\"rulesets\":[\"base\"],\"token\":\"%s\"}", id, tok);
-            else snprintf(out, sizeof out, "{\"type\":\"hello\",\"id\":%d,\"protocol\":\"wotr-bot/0.2\",\"name\":\"CWOTR\",\"version\":\"0.4\",\"events\":false,\"rulesets\":[\"base\"]}", id);
+            if (tok) snprintf(out, sizeof out, "{\"type\":\"hello\",\"id\":%d,\"protocol\":\"wotr-bot/0.2\",\"name\":\"CWOTR\",\"version\":\"0.5.0\",\"events\":false,\"rulesets\":[\"base\"],\"token\":\"%s\"}", id, tok);
+            else snprintf(out, sizeof out, "{\"type\":\"hello\",\"id\":%d,\"protocol\":\"wotr-bot/0.2\",\"name\":\"CWOTR\",\"version\":\"0.5.0\",\"events\":false,\"rulesets\":[\"base\"]}", id);
             send_line(out);
         } else if (!strcmp(type, "new_game")) {
             B.me = side_of(j_str(m, "side")); if (B.me < 0) B.me = FP;
