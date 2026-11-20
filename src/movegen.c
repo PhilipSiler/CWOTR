@@ -296,7 +296,7 @@ void apply_naz_plan(State *s, Move m) {
     if (t1 < NREG) {
         if (s->minion_loc[M_WK] < NREG) s->minion_loc[M_WK] = (uint8_t)t1;
         int mo = s->minion_loc[M_MOUTH];
-        if (mo < NREG && DIST[mo][t1] <= 3 && !(s->siege[mo] && s->ctrl[mo] == SH)) s->minion_loc[M_MOUTH] = (uint8_t)t1;
+        if (!s->naz_only && mo < NREG && DIST[mo][t1] <= 3 && !(s->siege[mo] && s->ctrl[mo] == SH)) s->minion_loc[M_MOUTH] = (uint8_t)t1;
     }
     for (int k = 0; k < 2; k++) {
         int t = k ? t2 : t1;
@@ -345,6 +345,7 @@ static int gen_naz_chain(const State *s, Move *out) {
     }
     for (int k = 0; k < 2; k++) {
         int mi = k ? M_MOUTH : M_WK, src = s->minion_loc[mi];
+        if (mi == M_MOUTH && s->naz_only) continue;        /* "Move any or all of the Nazgul": not the Mouth */
         if (src >= NREG || ((s->comp_moved >> k) & 1)) continue;
         if (mi == M_MOUTH && s->siege[src] && s->ctrl[src] == SH) continue;
         uint8_t reach[NREG];        /* the Mouth walks: up to three regions, never through a Stronghold he may not enter */

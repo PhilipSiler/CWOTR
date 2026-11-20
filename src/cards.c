@@ -464,8 +464,9 @@ void fr_cardfx(State *s, Frame *f) {
         for (int i = 0; i < 3; i++) h += d6(s) >= thr;
         add_corruption(s, h);
     } else if (c == CARD_THE_NAZGUL_STRIKE || c == CARD_NAZGUL_SEARCH) {
-        s->comp_moved = 0;
+        s->comp_moved = 0; s->naz_only = 1;
         CALL(push(s, FR_NAZMOVE));
+        s->naz_only = 0;
         if (s->naz[s->fsp_loc] || s->minion_loc[M_WK] == s->fsp_loc) {
             if (c == CARD_NAZGUL_SEARCH) { if (!s->revealed) CALL(push_reveal(s)); }
             else {
@@ -569,7 +570,7 @@ void fr_cardfx(State *s, Frame *f) {
             if (s->mv.a == 0) { recruit_naz(s, s->minion_loc[M_WK]); recruit_naz(s, s->minion_loc[M_WK]); f->v[3] = 1; }
             else if (s->mv.a == 255) f->v[3] = 1;
         }
-        if (!f->v[3]) { s->comp_moved = 0; s->lock[0] = s->lock[1] = 0; memset(s->naz_moved, 0, sizeof s->naz_moved); CALL(push(s, FR_NAZMOVE)); }
+        if (!f->v[3]) { s->comp_moved = 0; s->lock[0] = s->lock[1] = 0; memset(s->naz_moved, 0, sizeof s->naz_moved); s->naz_only = 1; CALL(push(s, FR_NAZMOVE)); s->naz_only = 0; }
         s->lock[0] = s->lock[1] = 0;
         {
             Move tmp[MAXOPT];

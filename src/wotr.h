@@ -166,6 +166,7 @@ typedef struct State {
     uint8_t mithril_tile, mithril_frame;   /* Mithril Coat and Sting: the first tile (+1) held out of the pool until the Hunt of frame mithril_frame ends */
     uint8_t hunt_drawn;              /* the tile a HF_DRAW_ONLY Hunt drew (255: none, e.g. Wizard's Staff) */
     uint8_t naz_moved[NREG];         /* Nazgul that have moved into each region in this action: each Nazgul moves once, the others may still go */
+    uint8_t naz_only;               /* a card moves "the Nazgul" (the Witch-king among them): not the Mouth of Sauron */
     uint8_t qreg;                    /* the region a Q_EXCESS question is about */
     uint8_t qtag;                    /* which question a generic D_CARD_OPTION is (Q_*: written for the protocol by bridge.c) */
 } State;
