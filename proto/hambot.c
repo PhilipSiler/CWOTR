@@ -525,16 +525,72 @@ static int settled_answer(const J *decision) {
     return -1;
 }
 /* A safe answer while the copy is out of step: no declaring the Fellowship, few Hunt dice. */
-static int fallback_answer(const J *decision) {
+/* The answer when the copy cannot place the question (it lost track of the game): chosen from the options with rules
+   of thumb and the referee's view, never the engine's move. A battle's strengths: Regulars 1, Elites 2, as in
+   casualties. */
+static int view_int(const J *o, const char *key);
+static const J *battle_units(const J *view, int side) {     /* the attackers, or the defenders' region's units */
+    const J *b = view ? j_get(view, "battle") : NULL;
+    if (!b || b->type != J_OBJ) return NULL;
+    if (side == side_of(j_str(b, "attacker"))) return j_get(b, "attackers");
+    const J *regs = j_get(view, "regions"), *r = regs ? j_get(regs, j_str(b, "region")) : NULL;
+    return r ? j_get(r, "units") : NULL;
+}
+static int battle_strength(const J *view, int side) {
+    const J *b = view ? j_get(view, "battle") : NULL;
+    if (!b || b->type != J_OBJ) return -1;
+    int st = 0;
+    const J *units = battle_units(view, side);
+    for (const J *u = units ? units->child : NULL; u; u = u->next) {
+        int n = nation_of(j_str(u, "nation")); const char *k = j_str(u, "unit");
+        if (n < 0 || !k || NAT_SIDE(n) != side) continue;
+        int c = view_int(u, "n");
+        if (!strcmp(k, "regular")) st += c; else if (!strcmp(k, "elite")) st += 2 * c;
+    }
+    return st;
+}
+static int opt_of(const J *opts, const char *key, const char *val) {
+    for (const J *o = opts ? opts->child : NULL; o; o = o->next) { const char *v = j_str(o, key); if (v && !strcmp(v, val)) return (int)j_get(o, "o")->num; }
+    return -1;
+}
+static int fallback_answer(const J *decision, const J *view) {
     const char *kind = j_str(decision, "kind");
     const J *opts = j_get(decision, "options");
-    int s0 = settled_answer(decision);
+    int s0 = settled_answer(decision), o;
     if (s0 >= 0) return s0;
-    for (const J *o = opts ? opts->child : NULL; o; o = o->next) {
-        const char *k = j_str(o, "kind");
-        if (kind && !strcmp(kind, "FELLOWSHIP_PHASE") && k && !strcmp(k, "done")) return (int)j_get(o, "o")->num;
-        if (kind && !strcmp(kind, "HUNT_ALLOCATION") && k && !strcmp(k, "hunt_dice") && j_get(o, "count") && (int)j_get(o, "count")->num == 1) return (int)j_get(o, "o")->num;
+    if (!kind || !opts) return 0;
+    int ours = battle_strength(view, me), theirs = battle_strength(view, 1 - me);
+    if (!strcmp(kind, "FELLOWSHIP_PHASE") && (o = opt_of(opts, "kind", "done")) >= 0) return o;
+    if (!strcmp(kind, "HUNT_ALLOCATION")) for (const J *x = opts->child; x; x = x->next) if (j_get(x, "count") && (int)j_get(x, "count")->num == 1) return (int)j_get(x, "o")->num;
+    if (!strcmp(kind, "COMBAT_CARD") && (o = opt_of(opts, "kind", "none")) >= 0) return o;       /* the card stays for later */
+    if (!strcmp(kind, "CASUALTY")) {        /* a Regular of the largest group first, then an Elite reduced, then removed */
+        int best = -1, bn = -1;
+        for (const J *x = opts->child; x; x = x->next) {
+            const char *u = j_str(x, "unit"), *e = j_str(x, "effect");
+            if (!u || !e || strcmp(u, "regular") || strcmp(e, "remove")) continue;
+            int n = 0; const J *list = battle_units(view, me);
+            for (const J *y = list ? list->child : NULL; y; y = y->next) if (j_str(y, "nation") && j_str(x, "nation") && !strcmp(j_str(y, "nation"), j_str(x, "nation")) && j_str(y, "unit") && !strcmp(j_str(y, "unit"), "regular")) n += view_int(y, "n");
+            if (n > bn) { bn = n; best = (int)j_get(x, "o")->num; }
+        }
+        if (best >= 0) return best;
+        if ((o = opt_of(opts, "effect", "reduce")) >= 0) return o;
     }
+    if (!strcmp(kind, "CEASE_ATTACK")) return (o = opt_of(opts, "kind", ours >= 0 && theirs >= 0 && ours < theirs ? "cease" : "continue")) >= 0 ? o : 0;
+    if (!strcmp(kind, "RETREAT")) {         /* stand unless clearly outnumbered */
+        if (ours >= 0 && theirs >= 0 && 2 * ours < theirs) { for (const J *x = opts->child; x; x = x->next) if (j_str(x, "kind") && !strcmp(j_str(x, "kind"), "retreat")) return (int)j_get(x, "o")->num; }
+        if ((o = opt_of(opts, "kind", "stand")) >= 0) return o;
+    }
+    if (!strcmp(kind, "FIELD_OR_SIEGE")) return (o = opt_of(opts, "kind", ours >= 0 && theirs >= 0 && ours < theirs ? "siege" : "field")) >= 0 ? o : 0;
+    if (!strcmp(kind, "ADVANCE")) for (const J *x = opts->child; x; x = x->next) if (j_str(x, "kind") && !strcmp(j_str(x, "kind"), "advance") && j_get(x, "all") && j_get(x, "all")->num) return (int)j_get(x, "o")->num;
+    if (!strcmp(kind, "EXTEND_SIEGE") && (o = opt_of(opts, "kind", "stop")) >= 0) return o;
+    if (!strcmp(kind, "WHITE_RIDER") && (o = opt_of(opts, "kind", "use")) >= 0) return o;
+    if (!strcmp(kind, "ARMY_SELECTION")) {  /* every unit goes */
+        int best = -1, bc = -1;
+        for (const J *x = opts->child; x; x = x->next) { const J *c = j_get(x, "count"); if (c && c->num > bc) { bc = (int)c->num; best = (int)j_get(x, "o")->num; } }
+        if (best >= 0) return best;
+    }
+    if (!strcmp(kind, "CHOOSE_ATTACK")) for (const J *x = opts->child; x; x = x->next) if (j_get(x, "all") && j_get(x, "all")->num) return (int)j_get(x, "o")->num;
+    if (!strcmp(kind, "CARD_CHOICE") && (o = opt_of(opts, "answer", "skip")) >= 0) return o;   /* a card's "you may": not */
     return 0;
 }
 /* Which units go (ARMY_SELECTION): the referee asks unit by unit, about its own set of units in its own order; the engine's
@@ -1664,7 +1720,7 @@ int main(int argc, char **argv) {
             const J *d = j_get(m, "decision");
             const char *fp = d ? j_str(d, "fingerprint") : NULL;
             int o = d ? answer(d, j_get(m, "view")) : -1;
-            if (o < 0) { o = d ? fallback_answer(d) : 0; st.fallback++; LOG("FALLBACK %s: %s", d ? j_str(d, "kind") : "?", lost_why); }
+            if (o < 0) { o = d ? fallback_answer(d, j_get(m, "view")) : 0; st.fallback++; LOG("FALLBACK %s: %s", d ? j_str(d, "kind") : "?", lost_why); }
             send_choice(iid, o, fp);
             clock_gettime(CLOCK_MONOTONIC, &t1);
             VLOG("answered %s with %d in %.1f ms", d ? j_str(d, "kind") : "?", o, (t1.tv_sec - t0.tv_sec) * 1e3 + (t1.tv_nsec - t0.tv_nsec) / 1e6);
