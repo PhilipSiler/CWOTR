@@ -18,6 +18,8 @@
  *   HAMBOT_VERBOSE=1           every decision and every step it follows on stderr
  *   HAMBOT_CHECK=1             compare the copy with the view between moves; log where they part (DIVERGED, LOST)
  *   HAMBOT_TRACE=<region>      that region's units and both sides' dice after every event
+ *   HAMBOT_TIME=1 (or a share; 1 means 0.8)  use the clock: each Action decision gives the rollout chooser a share of it (off: the
+ *                              release's settings, an answer at once)
  *
  * Over a WebSocket: ws_stdio.py (see README.md, "Playing on the BehindMedia site"). Offline: replay.py feeds a
  * recorded game back in and checks the copy at both sides' decisions. Build: make -C proto hambot. */
@@ -1434,13 +1436,36 @@ static int resync(const J *v, int pov) {
 }
 
 /* ================= our decisions ================= */
+/* Time (HAMBOT_TIME, off by default: the release plays at once). With it, each Action decision gives the engine's
+ * rollout chooser (roll_choose: the one-step scores shortlist roll_k moves, rollouts with shared dice decide) a share
+ * of the clock: under a per-decision clock HAMBOT_TIME of it less 400 ms (1 means 0.8, the most that is safe: answers
+ * overshoot their budget by about 20 ms), under a game clock the time left spread
+ * over the Actions expected to remain, plus most of the increment. Other questions are answered at once. */
+static double time_share;           /* 0: off */
+static int clock_game;              /* new_game's clock: 1 a game clock, 0 per decision */
+static double clock_left, clock_incr; static int clock_known;     /* the decision's clock (decide's "clock") */
+static double action_budget_ms(void) {
+    if (time_share <= 0 || !clock_known) return 0;
+    double margin = 400, b;
+    if (!clock_game) b = clock_left * time_share - margin;
+    else {
+        int turns_left = 16 - R.s.turn; if (turns_left < 3) turns_left = 3;
+        double actions_left = turns_left * 5.0;                   /* about five Actions a turn for a side */
+        b = (clock_left - 4000) / actions_left + 0.8 * clock_incr;
+        if (b > clock_left * 0.2) b = clock_left * 0.2;
+    }
+    return b > 20 ? b : 0;
+}
 static Move choose_move(void) {
     State c = R.s; float bv; int n;
     wotr_prune = 1;
     wotr_determinize(&c, me, own_rng += 0x1234567);   /* the player sees only what its side may know */
+    double budget = R.s.dkind == D_ACTION ? action_budget_ms() : 0;
+    ag.roll_ms = (float)budget; ag.roll_n = 0; ag.roll_tau = 0.15f; ag.roll_k = 12; ag.roll_turns = 0;
     Move m = agent_choose(&ag, &c, &bv, &n);
+    ag.roll_ms = 0;
     char buf[200]; wotr_move_str(&R.s, m, buf, sizeof buf);
-    VLOG("CWOTR: %s (chance the Free Peoples win %.0f%%)", buf, 100 * nn_prob(bv));
+    VLOG("CWOTR: %s (chance the Free Peoples win %.0f%%%s)", buf, 100 * nn_prob(bv), budget > 0 ? ", rollouts" : "");
     return m;
 }
 /* the player moves the Nazgul as one plan (M_NAZ_PLAN: where they all end up); the referee asks one Nazgul or
@@ -1684,12 +1709,15 @@ static void new_game(const J *m) {
     const char *side = j_str(m, "side"), *g = j_str(m, "game");
     me = side_of(side);
     snprintf(game_id, sizeof game_id, "%s", g ? g : "?");
+    const J *ck = j_get(m, "clock"); const char *kind = ck ? j_str(ck, "kind") : NULL;
+    clock_game = kind && !strcmp(kind, "game");
     const J *sb = j_get(m, "seed_bot");
     own_rng = sb && sb->type == J_NUM ? (uint64_t)sb->num : (uint64_t)time(NULL);
     ag.rng = own_rng * 31 + 7;
     /* CWOTR 0.1's settings: the Free Peoples one step ahead, the Shadow with a short look-ahead (3 deep, 4 wide) */
     if (me == SH) { ag.depth = 3; ag.width = 4; ag.replies = 1; ag.narrow = 6; ag.taper = 0; ag.dpol[FP] = &player->pol[FP]; ag.dpol[SH] = &player->pol[SH]; }
     else { ag.depth = 0; ag.width = 0; ag.dpol[FP] = ag.dpol[SH] = NULL; }
+    if (time_share > 0) { ag.dpol[FP] = &player->pol[FP]; ag.dpol[SH] = &player->pol[SH]; }   /* the rollouts follow the move networks' first moves */
     memset(&R, 0, sizeof R); R.ext = -1;
     started = 0; lost = 0; nev = 0; rq_clear(); leaves_reset(); nlate = 0; adv_on = 0; stash_on = 0; memset(stash_ldr, 0, sizeof stash_ldr); stash_naz = 0; diverged = 0; nrecent = 0;
     while (ndefer) free(defer[--ndefer]);
@@ -1708,6 +1736,7 @@ int main(int argc, char **argv) {
     if (argc < 2) { fprintf(stderr, "usage: hambot <player: the path without .fp/.sh/.pfp/.psh>\n"); return 2; }
     verbose = getenv("HAMBOT_VERBOSE") && *getenv("HAMBOT_VERBOSE") == '1';
     checking = getenv("HAMBOT_CHECK") && *getenv("HAMBOT_CHECK") == '1';
+    if (getenv("HAMBOT_TIME")) { time_share = atof(getenv("HAMBOT_TIME")); if (time_share > 0.95) time_share = 0.8; if (time_share < 0) time_share = 0; }
     wotr_global_init(); feat_init(); names_init();
     if (getenv("HAMBOT_TRACE")) trace_r = region_of(getenv("HAMBOT_TRACE"));
     player = malloc(sizeof(Player));
@@ -1742,6 +1771,8 @@ int main(int argc, char **argv) {
             process_events();
             const J *d = j_get(m, "decision");
             const char *fp = d ? j_str(d, "fingerprint") : NULL;
+            { const J *ck = j_get(m, "clock"), *lm = ck ? j_get(ck, "left_ms") : NULL, *im = ck ? j_get(ck, "increment_ms") : NULL;
+              clock_known = lm && lm->type == J_NUM; clock_left = clock_known ? lm->num : 0; clock_incr = im && im->type == J_NUM ? im->num : 0; }
             int o = d ? answer(d, j_get(m, "view")) : -1;
             if (o < 0) { o = d ? fallback_answer(d, j_get(m, "view")) : 0; st.fallback++; LOG("FALLBACK %s: %s", d ? j_str(d, "kind") : "?", lost_why); }
             send_choice(iid, o, fp);

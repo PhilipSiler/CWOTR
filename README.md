@@ -62,10 +62,18 @@ python3 proto/ws_stdio.py --connect "wss://sandbox.wotr.behindmedia.com/referee?
   One game per connection; open more connections for more games at once.
 * **A tournament:** the seat token the organiser gives for each match, to the same address.
 
+**Time:** by default Hambot answers at once (about 2 ms), as released. With `HAMBOT_TIME=1` it uses its clock: each
+Action decision runs the rollout chooser (`roll_choose`) for a share of it. Under a per-decision clock that share is
+80% of the clock less 400 ms (`HAMBOT_TIME=0.6` etc. sets another share, at most 0.95). Under a game clock it is the
+time left over the Actions expected to remain, plus most of the increment, and at most a fifth of what is left. The
+other questions are still answered at once. At 2 s per decision (a share of 0.5 then, 600 ms per Action), Hambot with
+time beat Hambot without 70% ± 12 (40 games) and greedy 40 of 40. The slowest of 27,000 answers took 620 ms (the
+budget overshot by 20 ms at most).
+
 Diagnostics, all on stderr: `HAMBOT_VERBOSE=1` logs every decision and every step it follows; `HAMBOT_CHECK=1`
 compares its copy with the referee's view between moves and logs where they part (`DIVERGED`, `LOST`); when they do,
 it rebuilds its copy from the view and plays on. A question it cannot place in its copy still gets a legal answer
-(`FALLBACK`, the first option). `proto/replay.py RECORD.protocol.jsonl SIDE | HAMBOT_CHECK=1 proto/hambot players/cwotr1`
+(`FALLBACK`, from rules of thumb on the view). `proto/replay.py RECORD.protocol.jsonl SIDE | HAMBOT_CHECK=1 proto/hambot players/cwotr1`
 plays a recorded game (the referee's `--records`) back into it and checks the copy before every move of either side.
 
 ## Engine design
