@@ -89,7 +89,8 @@ int cc_playable(const State *s, int side, int c) {
     case CC_THEY_ARE_TERRIBLE: case CC_DREAD_AND_DESPAIR: case CC_FOUL_STENCH: return naz_lead_now(s) >= 1;
     case CC_BLACK_BREATH: case CC_WORDS_OF_POWER: return s->naz[sr] > 0 || s->minion_loc[M_WK] == sr;
     case CC_DURINS_BANE: return DIST[d][R_MORIA] <= 2;
-    case CC_DEVILRY_OF_ORTHANC: return s->reg[sr][ISENGARD] + s->eli[sr][ISENGARD] > 0 && REGION[d].settle == S_STRONGHOLD;
+    /* "the defending Army is in a Stronghold": inside it, a siege battle (Card Almanac) */
+    case CC_DEVILRY_OF_ORTHANC: return s->reg[sr][ISENGARD] + s->eli[sr][ISENGARD] > 0 && REGION[d].settle == S_STRONGHOLD && b->siege;
     case CC_MUMAKIL: return s->eli[sr][SOUTHRON] > 0;
     case CC_WE_COME_TO_KILL: return elites(s, SH, sr) > 0;
     default: return 1;
