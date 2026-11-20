@@ -30,7 +30,7 @@
 
 
 #define VERSION "0.1.0"
-static int verbose, checking, foreign, trace_r = -1;
+static int verbose, checking, foreign, trace_r = -1, following;
 static void logf_(const char *fmt, ...) {
     va_list ap; va_start(ap, fmt); vfprintf(stderr, fmt, ap); va_end(ap); fputc('\n', stderr); fflush(stderr);
 }
@@ -86,9 +86,23 @@ static int ensure_card(State *s, int c, int where) {
     if (s->card_where[c] == where) { known[c] = 1; return 1; }
     int deck = CARD_DECK(c), x = -1;
     for (int k = deck * 24; k < deck * 24 + 24 && x < 0; k++) if (k != c && s->card_where[k] == where && !known[k]) x = k;
-    if (x < 0) { VLOG("  no stand-in for %s", CARD_KEY[c]); return 0; }
     int wc = s->card_where[c];
     if (wc == W_TABLE || (wc == W_DISCARD && known[c])) { VLOG("  %s is %s, not a stand-in", CARD_KEY[c], wc == W_TABLE ? "on the table" : "discarded"); return 0; }
+    /* none of that deck: the opponent's hand held one card too few of it (the counts by deck are guesses between our
+       decisions): a stand-in of the other deck goes back, or, with none at all, the hand grows by the real card */
+    if (x < 0 && where == W_HAND && CARD_SIDE(c) != me) {
+        int other = (deck ^ 1) * 24;
+        for (int k = other; k < other + 24 && x < 0; k++) if (s->card_where[k] == W_HAND && !known[k]) x = k;
+        if (x >= 0) { s->card_where[x] = W_DECK; s->card_where[c] = W_HAND; known[c] = 1; VLOG("  stand-in %s (other deck) exchanged for %s", CARD_KEY[x], CARD_KEY[c]); }
+        else { s->card_where[c] = W_HAND; s->hand_n[CARD_SIDE(c)]++; known[c] = 1; VLOG("  %s added to the opponent's hand", CARD_KEY[c]); }
+        if (s->dkind == D_BATTLE_CARD && s->dplayer == CARD_SIDE(c) && s->nopt < MAXOPT) {
+            int has = 0; for (int i = 0; i < s->nopt; i++) { if (s->opt[i] == x && x >= 0) s->opt[i] = (uint8_t)c; has |= s->opt[i] == c; }
+            if (!has) s->opt[s->nopt++] = (uint8_t)c;
+        }
+        if (depth == 0) leaves_reset();
+        return 1;
+    }
+    if (x < 0) { VLOG("  no stand-in for %s", CARD_KEY[c]); return 0; }
     s->card_where[x] = (uint8_t)wc; s->card_where[c] = (uint8_t)where; known[c] = 1;
     if (s->b.active) for (int side = 0; side < 2; side++) if (s->b.card[side] == x) s->b.card[side] = (uint8_t)c;
     /* a question already asked lists the stand-in (or, for a Combat card, may lack the real one): ask it anew */
@@ -385,6 +399,9 @@ static int j_equal(const J *a, const J *b) {
  * skip"; a region, a character or a card named by both (a destination as "to", a move as "from>to"). */
 static int loose_match(const J *sj, const J *opt) {
     const J *yes = j_get(sj, "yes"), *skip = j_get(opt, "skip");
+    /* Scouts into the Stronghold: the referee's "siege", the engine's retreat into the battle's own region */
+    const char *ans = j_str(opt, "answer"), *sk = j_str(sj, "kind");
+    if (ans && !strcmp(ans, "siege") && sk && !strcmp(sk, "retreat") && R.s.b.active) return region_of(j_str(sj, "region")) == R.s.b.dst ? 0 : -1;
     int oskip = skip && skip->type == J_BOOL && skip->num;
     if (yes && yes->type == J_BOOL) return (yes->num != 0) == !oskip ? 0 : -1;
     const J *sskip = j_get(sj, "skip");
@@ -416,6 +433,9 @@ static int step_match(const Step *sp, const J *opt) {
         if (j_equal(f, o)) score++;
         /* an advance with part of the Army: CWOTR advances all; the referee's split is applied after (sel_fixup) */
         else if (!strcmp(f->key, "all") && sk && !strcmp(sk, "advance")) ;
+        /* an attack with part of the Army where the engine lists only the whole one (a Character die's attack): the
+           referee's unit counts follow and are applied (selection mode) */
+        else if (!strcmp(f->key, "all") && sk && (!strcmp(sk, "attack") || (!strcmp(sk, "army_move") && following)) && f->type == J_BOOL && f->num && o->type == J_BOOL && !o->num) ;
         /* a rearguard split CWOTR cannot make (it fills nation by nation): the count may differ */
         else if (!strcmp(f->key, "count") && strstr(sp->text, "\"unit\"") && R.s.dkind == D_ACTION && depth > 0) ;
         /* the die the referee's player picked, where the engine pays with another (apply_leaf pays with the referee's) */
@@ -455,13 +475,25 @@ static void option_cards(const J *opt, int side) {
     }
     const J *pay = j_get(opt, "pay");
     if (pay && pay->type == J_ARR) for (const J *p = pay->child; p; p = p->next) if (p->type == J_STR) { int c = card_of(p->str); if (c >= 0) ensure_card(&R.s, c, W_HAND); }
+    /* the Shadow forcing A Power too Great / The Power of Tom Bombadil off the table pays with a Character card and an
+       Army (Strategy) card, hidden: the stand-ins in its hand are made such cards */
+    const char *action = j_str(opt, "action");
+    if (side == SH && side != me && action && !strcmp(action, "force_discard")) {
+        State *s = &R.s; int hc = 0, hs = 0;
+        for (int c = 48; c < 72; c++) hc |= s->card_where[c] == W_HAND;
+        for (int c = 72; c < 96; c++) hs |= s->card_where[c] == W_HAND && CARD[c].type == F_ARMY;
+        for (int c = 48; c < 72 && !hc; c++) if (s->card_where[c] == W_DECK && !known[c] && ensure_card(s, c, W_HAND)) { known[c] = 0; hc = 1; }
+        for (int c = 72; c < 96 && !hs; c++) if (s->card_where[c] == W_DECK && !known[c] && CARD[c].type == F_ARMY && ensure_card(s, c, W_HAND)) { known[c] = 0; hs = 1; }
+    }
 }
 
 /* Questions the referee asks that the engine settles by itself: the new Guide (the strongest Companion), the
  * unit a card recruits (an Elite if there is one). */
 static int settled_by_engine(const char *decision, const J *opt) {
     if (decision && !strcmp(decision, "CHOOSE_GUIDE")) return 1;
-    if (decision && !strcmp(decision, "CARD_CHOICE") && opt && j_str(opt, "kind") && !strcmp(j_str(opt, "kind"), "draw")) return 1;
+    /* a bonus draw the engine makes by itself (Gandalf the Grey's); the Palantir of Orthanc's deck is the engine's question */
+    if (decision && !strcmp(decision, "CARD_CHOICE") && opt && j_str(opt, "kind") && !strcmp(j_str(opt, "kind"), "draw")
+        && !(R.s.dkind == D_CARD_OPTION && R.s.qtag == Q_DRAW_DECK)) return 1;
     const char *a = opt ? j_str(opt, "answer") : NULL;
     return decision && !strcmp(decision, "CARD_CHOICE") && a && (!strcmp(a, "ELITE") || !strcmp(a, "REGULAR"));
 }
@@ -647,7 +679,9 @@ static void discard_direct(int side, const J *opt) {
     VLOG("  a discard the copy did not expect: %s", CARD_KEY[c]);
 }
 /* Follows one answered decision. look: the events after it (for a hidden Combat card shown later). */
-static int follow_choice(const J *e, int look) {
+static int follow_choice_(const J *e, int look);
+static int follow_choice(const J *e, int look) { following = 1; int r = follow_choice_(e, look); following = 0; return r; }
+static int follow_choice_(const J *e, int look) {
     int deferred = 0;
     if (lost || !started) return 0;
     const char *side_key = j_str(e, "side"), *decision = j_str(e, "decision");
@@ -794,6 +828,13 @@ static int follow_choice(const J *e, int look) {
     int forced = 0;
     for (int guard = 0; guard < 40; guard++) {
         if (!leaves_ensure()) { VLOG("  no decision in the engine for %s %s", side_key, decision); st.ignored++; break; }
+        /* the engine asks a Combat card the referee never asked (by its reading the side had none to play), and the
+           referee is already further (any other question): none */
+        if (R.s.dkind == D_BATTLE_CARD && depth <= 0 && decision && strcmp(decision, "COMBAT_CARD") && forced < 4) {
+            int pick = -1;
+            for (int i = 0; i < nl && pick < 0; i++) if (alive[i] && L[i].nstep && strstr(L[i].st[0].text, "\"kind\":\"none\"")) pick = i;
+            if (pick >= 0) { forced++; VLOG("  %s's Combat card, not asked by the referee: none", SIDE_KEY[R.s.dplayer]); apply_leaf(pick); continue; }
+        }
         if (R.s.dplayer != side) {
             if (phase_done(decision, opt)) { VLOG("  the engine ended the Fellowship phase already"); break; }
             /* the Companions' move is over at the referee (no group left to it): the engine's remaining groups stay */
@@ -804,6 +845,17 @@ static int follow_choice(const J *e, int look) {
                 if (pick >= 0) { VLOG("  the rest of the Companions stay"); apply_leaf(pick); continue; }
             }
             if (opponent_no_card()) continue;
+            /* a Combat card question the referee skipped (by its reading, that side had no card to play): none, our
+               own side too (the other side's choice comes first) */
+            if (R.s.dkind == D_BATTLE_CARD && depth <= 0 && forced++ < 3) {
+                int pick = -1;
+                for (int i = 0; i < nl && pick < 0; i++) if (alive[i] && L[i].nstep && strstr(L[i].st[0].text, "\"kind\":\"none\"")) pick = i;
+                if (pick >= 0) {
+                    if (verbose) { char b[400] = ""; size_t bn = 0; for (int i = 0; i < R.s.nopt && bn < 300; i++) if (R.s.opt[i] < NCARD) bn += (size_t)snprintf(b + bn, sizeof b - bn, " %s", CARD_KEY[R.s.opt[i]]);
+                                   VLOG("  %s's Combat card, not asked by the referee: none (the engine offered:%s)", SIDE_KEY[R.s.dplayer], b); }
+                    apply_leaf(pick); continue;
+                }
+            }
             /* both sides over the hand limit: the referee asks the Shadow first, CWOTR the Free Peoples: wait for it */
             if (decision && !strcmp(decision, "DISCARD_EXCESS_CARD") && R.s.dkind == D_DISCARD) { VLOG("  %s's discard waits for the engine", side_key); deferred = 1; break; }
             /* a discard the copy did not expect (its count of that hand was off): made in the copy as it is */
@@ -1018,7 +1070,7 @@ static void process_events(void) {
             if (c >= 0 && side >= 0 && side != me) known[c] = 1;
         }
         if (trace_r >= 0 && kind) {          /* HAMBOT_TRACE=region: the copy's units there after each event (debugging) */
-            char tb[160]; size_t tn = 0;
+            char tb[160] = ""; size_t tn = 0;
             for (int n = 0; n < NNAT; n++) if (R.s.reg[trace_r][n] || R.s.eli[trace_r][n]) tn += (size_t)snprintf(tb + tn, sizeof tb - tn, " %s %dR%dE", NATION_KEY[n], R.s.reg[trace_r][n], R.s.eli[trace_r][n]);
             const J *o = j_get(x, "option");
             int dsh = 0, dfp = 0; for (int f = 0; f < NFACE; f++) { dsh += R.s.dice[SH][f]; dfp += R.s.dice[FP][f]; }
@@ -1350,6 +1402,16 @@ static int discard_ahead(const J *opts) {
     State t = R.s; Move mv[MAXMOVES];
     for (int g = 0; g < 4 && !t.winner && t.dkind == D_DISCARD && t.dplayer != me; g++) { int n = wotr_moves(&t, mv); if (!n) return -1; wotr_apply(&t, mv[0]); }
     if (t.winner || t.dkind != D_DISCARD || t.dplayer != me) return -1;
+    /* our hand is the options: a card the referee no longer lists was discarded already (our earlier discard, waiting
+       in the copy for the opponent's) */
+    {
+        uint8_t listed[NCARD]; memset(listed, 0, sizeof listed);
+        for (const J *o = opts->child; o; o = o->next) { int c = card_of(j_str(o, "card")); if (c >= 0) listed[c] = 1; }
+        for (int c = me * 48; c < me * 48 + 48; c++) if (t.card_where[c] == W_HAND && !listed[c]) { t.card_where[c] = W_DISCARD; t.hand_n[me]--; }
+        t.nopt = 0;
+        for (int c = me * 48; c < me * 48 + 48; c++) if (t.card_where[c] == W_HAND) t.opt[t.nopt++] = (uint8_t)c;
+        if (!t.nopt) return -1;
+    }
     State c = t; float bv; int n;
     wotr_determinize(&c, me, own_rng += 0x1234567);
     Move m = agent_choose(&ag, &c, &bv, &n);
@@ -1406,14 +1468,28 @@ static int answer(const J *decision, const J *view) {
     if (kind && !strcmp(kind, "FELLOWSHIP_PHASE") && !engine_in_fsp_phase()) {
         for (const J *o = opts->child; o; o = o->next) { const char *k = j_str(o, "kind"); if (k && !strcmp(k, "done")) { VLOG("the engine ended the Fellowship phase already"); return (int)j_get(o, "o")->num; } }
     }
-    for (int g = 0; g < 6 && !(kind && !strcmp(kind, "FELLOWSHIP_PHASE")) && opponent_no_card(); g++) ;
-    /* questions the referee settled by itself are applied first */
-    for (int guard = 0; guard < 10 && leaves_ensure() && R.s.dplayer != me; guard++) {
-        int i = first_alive(), distinct = 1;
-        for (int k = 0; k < nl; k++) if (alive[k] && !leaf_done(k) && strcmp(L[k].st[depth].text, L[i].st[depth].text)) distinct = 0;
-        if (!distinct) break;
-        st.forced++;
-        if (leaf_done(i)) apply_leaf(i); else { depth++; if (all_done()) apply_leaf(first_alive()); }
+    /* our own Combat card question the referee skipped (by its reading we had no card to play): none */
+    for (int g = 0; g < 2 && kind && strcmp(kind, "COMBAT_CARD") && leaves_ensure() && R.s.dplayer == me && R.s.dkind == D_BATTLE_CARD && depth == 0; g++) {
+        int pick = -1;
+        for (int i = 0; i < nl && pick < 0; i++) if (alive[i] && L[i].nstep && strstr(L[i].st[0].text, "\"kind\":\"none\"")) pick = i;
+        if (pick < 0) break;
+        VLOG("our Combat card, not asked by the referee: none");
+        apply_leaf(pick);
+    }
+    /* the opponent's questions the referee did not ask (no card, an unasked casualty, the rest of a Companions' move),
+       and questions with one answer the referee settled by itself: applied until our own question comes (one may
+       lead to the other) */
+    for (int round = 0; round < 4; round++) {
+        int moved = 0;
+        for (int g = 0; g < 6 && !(kind && !strcmp(kind, "FELLOWSHIP_PHASE")) && opponent_no_card(); g++) moved = 1;
+        for (int guard = 0; guard < 10 && leaves_ensure() && R.s.dplayer != me; guard++) {
+            int i = first_alive(), distinct = 1;
+            for (int k = 0; k < nl; k++) if (alive[k] && !leaf_done(k) && strcmp(L[k].st[depth].text, L[i].st[depth].text)) distinct = 0;
+            if (!distinct) break;
+            st.forced++; moved = 1;
+            if (leaf_done(i)) apply_leaf(i); else { depth++; if (all_done()) apply_leaf(first_alive()); }
+        }
+        if (!moved) break;
     }
     if (kind && !strcmp(kind, "DISCARD_EXCESS_CARD") && leaves_ensure() && R.s.dkind == D_DISCARD && R.s.dplayer != me) {
         /* the copy asks the opponent to discard first, but the view counts no excess in its hand: the copy held a
@@ -1457,7 +1533,8 @@ static int answer(const J *decision, const J *view) {
         if (pick >= 0) { VLOG("the card's battle has begun in the engine"); return pick; }
     }
     /* the route of a card's move CWOTR made already ("Which way?"): any */
-    if (kind && !strcmp(kind, "CARD_CHOICE") && R.s.reloc_on && opts->child && (j_str(opts->child, "region") || j_str(opts->child, "from")) &&
+    if (kind && !strcmp(kind, "CARD_CHOICE") && R.s.reloc_on && opts->child && (j_str(opts->child, "region") || j_str(opts->child, "from")
+            || (j_str(opts->child, "answer") && strchr(j_str(opts->child, "answer"), '>'))) &&
         !(leaves_ensure() && R.s.dplayer == me && (R.s.dkind == D_CARD_ARMY || R.s.dkind == D_CARD_REGION))) return (int)j_get(opts->child, "o")->num;
     if (kind && !strcmp(kind, "ARMY_SELECTION") && !selmode && (!leaves_ensure() || R.s.dplayer != me || R.s.dkind != D_ACTION)) {
         /* a card's Army move: the engine moved the units itself, all of them */
