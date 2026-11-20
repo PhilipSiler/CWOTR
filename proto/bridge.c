@@ -630,6 +630,7 @@ static void army_steps(Leaf *L, const State *s, Move m, int kind_first, const ch
     State t = *s; wotr_apply(&t, m);
     int all = m.e;
     for (int n = lo; n < hi; n++) all &= t.reg[src][n] + t.eli[src][n] == 0 || src == m.b;
+    if (side == SH && s->minion_loc[M_SARUMAN] == src) all = 0;         /* Saruman never leaves Orthanc: the reference then offers no "all" */
     if (okind[0] == 'a' && okind[1] == 'd') step(L, kind_first, "\"kind\":\"advance\",\"all\":%s}", all ? "true" : "false");
     else step(L, kind_first, "\"kind\":\"army_move\",\"from\":\"%s\",\"to\":\"%s\",\"all\":%s}", REGION_KEY[src], REGION_KEY[m.b], all ? "true" : "false");
     if (all) return;
@@ -821,7 +822,7 @@ static int build_leaves(const Ref *R, Leaf *L) {
         default: {                  /* a card's own question */
             int c = card_asking(s);
             const char *ck = c >= 0 && c < NCARD ? CARD_KEY[c] : "";
-            if (a == 255) step(l, K_CARD_CHOICE, "\"kind\":\"card_choice\",\"card\":\"%s\",\"answer\":\"none\",\"skip\":true}", ck);
+            if (a == 255) step(l, K_CARD_CHOICE, "\"kind\":\"card_choice\",\"card\":\"%s\",\"answer\":\"skip\",\"skip\":true}", ck);
             else if ((s->dkind == D_CARD_REGION || s->dkind == D_CARD_ARMY) && a < NREG) step(l, K_CARD_CHOICE, "\"kind\":\"card_choice\",\"card\":\"%s\",\"answer\":\"%s\",\"region\":\"%s\"}", ck, REGION_KEY[a], REGION_KEY[a]);
             else if (s->dkind == D_CARD_NATION && a < NNAT) step(l, K_CARD_CHOICE, "\"kind\":\"card_choice\",\"card\":\"%s\",\"answer\":\"%s\",\"nation\":\"%s\"}", ck, NATION_KEY[a], NATION_KEY[a]);
             else if (s->dkind == D_CARD_CARD && a < NCARD) step(l, K_CARD_CHOICE, "\"kind\":\"card_choice\",\"card\":\"%s\",\"answer\":\"%s\",\"target_card\":\"%s\"}", ck, CARD_KEY[a], CARD_KEY[a]);
@@ -1456,7 +1457,9 @@ static int find_option(const J *opts, const char *steptext);
 static int find_reworded(const J *opts, const char *steptext) {
     static const char *const SWAP[][2] = { { "\"hide_fellowship\"", "\"hide_fellowship_strider\"" }, { "\"hide_fellowship_strider\"", "\"hide_fellowship\"" },
                                            { "\"attack\"", "\"attack_with_leader\"" }, { "\"attack_with_leader\"", "\"attack\"" } };
-    char buf[260]; const char *p = strstr(steptext, ",\"as\":\"");
+    char buf[260]; const char *p = strstr(steptext, ",\"elven_ring\":false");       /* the site names the cards paid instead, and has no such field */
+    if (p) { snprintf(buf, sizeof buf, "%.*s%s", (int)(p - steptext), steptext, p + 19); return find_option(opts, buf); }
+    p = strstr(steptext, ",\"as\":\"");
     if (p) { const char *q = strchr(p + 7, '"'); if (!q) return -1; snprintf(buf, sizeof buf, "%.*s%s", (int)(p - steptext), steptext, q + 1); return find_option(opts, buf); }
     for (int i = 0; i < 4; i++) if ((p = strstr(steptext, SWAP[i][0])) != NULL && strncmp(p - 9, "\"action\":", 9) == 0) {
         snprintf(buf, sizeof buf, "%.*s%s%s", (int)(p - steptext), steptext, SWAP[i][1], p + strlen(SWAP[i][0]));
@@ -1497,6 +1500,7 @@ static void view_count(const J *v, const char *region, int cnt[2]) {
     }
 }
 /* The written rules for the questions the engine does not yet answer. Returns an option number (0 if nothing better). */
+static int find_answer(const J *opts, const char *ans);
 static int bot_rule(const Bot *B, int kind, const J *dec, const J *v) {
     const J *opts = j_get(dec, "options"), *bt = j_get(v, "battle");
     int o = -1, att = 0, def = 0, pos = 0;
@@ -1540,6 +1544,17 @@ static int bot_rule(const Bot *B, int kind, const J *dec, const J *v) {
     case K_ARMY_MOVE: case K_RECRUIT: case K_MOVE_COMPANIONS: case K_MOVE_MINIONS: o = find_kind(opts, "end"); break;
     case K_ARMY_SELECTION: { int bc = -1; for (const J *x = opts ? opts->child : NULL; x; x = x->next, pos++) { int c = j_int(x, "count", -1); if (c > bc) { bc = c; o = opt_number(x, pos); } } break; }
     case K_JOIN_GROUP: o = find_kind(opts, "join"); break;
+    case K_CARD_CHOICE: {           /* written answers for the cards' questions nothing above could settle */
+        static const char *const leave[] = { "meriadoc", "peregrin", "gimli", "legolas", "boromir", "strider", "gandalf-the-grey" };    /* who leaves the Fellowship first */
+        const char *q = j_str(j_get(dec, "context"), "question");
+        if ((o = find_answer(opts, "ELITE")) >= 0) break;                                   /* recruit the better figure */
+        if ((o = find_answer(opts, "yes")) >= 0) break;                                     /* a card on the table that helps the Hunt: use it */
+        if (q && strstr(q, "Companion separates")) { for (int k = 0; k < 7 && o < 0; k++) o = find_answer(opts, leave[k]); if (o >= 0) break; }
+        if (q && strstr(q, "Eliminate which figure")) {                                     /* lose a Regular before a Leader, an Elite last */
+            static const char *const u[] = { "regular", "leader", "elite" };
+            for (int k = 0; k < 3 && o < 0; k++) { pos = 0; for (const J *x = opts ? opts->child : NULL; x && o < 0; x = x->next, pos++) { const char *un = j_str(x, "unit"); if (un && !strcmp(un, u[k])) o = opt_number(x, pos); } }
+        }
+        break; }
     case K_ACTION: if ((o = find_kind(opts, "pass")) < 0) o = find_kv(opts, "use_die", "action", "draw_card"); break;
     default: break;
     }
@@ -1564,6 +1579,7 @@ static int bot_battle(Bot *B, const J *v, const J *dec, int target) {
     { const J *al = j_get(bt, "attackers");
       for (const J *u = al ? al->child : NULL; u; u = u->next) { const char *k = j_str(u, "unit"); if (k && !strcmp(k, "regular")) areg += j_int(u, "n", 1); else if (k && !strcmp(k, "elite")) aeli += j_int(u, "n", 1); } }
     card[att] = card_of(j_str(bt, "attacker_card")); card[1 - att] = card_of(j_str(bt, "defender_card"));
+    if (target == D_SELF_HITS && card_of(j_str(j_get(dec, "context"), "card")) >= 0) card[B->me] = card_of(j_str(j_get(dec, "context"), "card"));
     for (int k = 0; k < 2; k++) if (card[k] >= 0 && pre.card_where[card[k]] != W_HAND && pre.card_where[card[k]] != W_TABLE) { pre.card_where[card[k]] = W_HAND; pre.hand_n[CARD_SIDE(card[k])]++; }
     static Move mv[MAXMOVES], o[MAXMOVES]; int into = 0;
     if (target == D_ADVANCE) {          /* the defenders are gone from the view: one stand-in is put back, to be beaten again */
@@ -1576,19 +1592,26 @@ static int bot_battle(Bot *B, const J *v, const J *dec, int target) {
     int n = wotr_moves(&pre, mv), pick = -1, best = -1;
     for (int i = 0; i < n; i++) if (mv[i].type == M_ATTACK && mv[i].a == from && mv[i].b == to) { int sc = mv[i].c == areg && mv[i].d == aeli ? 1000 : mv[i].c + mv[i].d; if (sc > best) { best = sc; pick = i; } }
     if (target == D_ADVANCE && getenv("WOTR_BOT_DEBUG")) fprintf(stderr, "bot: advance %s>%s: attack found %d, into siege %d, defenders %d, attackers %d (view says %d+%d), control %d\n", REGION_KEY[from], REGION_KEY[to], pick >= 0, into, units(&pre, 1 - att, to), units(&pre, att, from), areg, aeli, pre.ctrl[to]);
-    if (pick < 0) return 0;
+    Move start;
+    if (pick >= 0) start = mv[pick];
+    else {                              /* not an attack a die can make (a card's: the Corsairs sail from Umbar): started directly, with the figures the view names */
+        if (!units(&pre, att, from) || !units(&pre, 1 - att, to)) { if (getenv("WOTR_BOT_DEBUG")) fprintf(stderr, "bot: battle %s>%s (decision %d): our engine cannot start this attack\n", REGION_KEY[from], REGION_KEY[to], (int)B->n_dec); return 0; }
+        memset(&start, 0, sizeof start); start.type = M_ATTACK; start.die = F_ARMY; start.a = (uint8_t)from; start.b = (uint8_t)to;
+        start.c = (uint8_t)(areg + aeli ? areg : 10); start.d = (uint8_t)(areg + aeli ? aeli : 10);
+    }
     int tot0 = units(&pre, FP, from) + units(&pre, SH, from) + (to != from ? units(&pre, FP, to) + units(&pre, SH, to) : 0);
     int dbg[ND + 1]; memset(dbg, 0, sizeof dbg);
     for (uint64_t seed = 1; seed <= 3000; seed++) {
         State t = pre; t.rng = seed * 0x9E3779B97F4A7C15ULL + B->rng;
-        wotr_apply(&t, mv[pick]);
+        wotr_apply(&t, start);
         if (t.b.active && round > 1) { t.b.round = (uint8_t)round; if (t.b.siege && t.b.max_rounds < round) t.b.max_rounds = (uint8_t)round; }
         for (int stp = 0; stp < 24 && !t.winner && (t.b.active || t.dkind == D_ADVANCE); stp++) {
             int mine = t.dplayer == B->me, ch = -1, fail = 0;
             int tot = units(&t, FP, from) + units(&t, SH, from) + (to != from ? units(&t, FP, to) + units(&t, SH, to) : 0);
+            for (int n = 0; n < NNAT; n++) tot += t.b.rear_reg[n] + t.b.rear_eli[n];       /* a rearguard is set aside by our engine for the length of the battle */
             if (mine && t.dkind == target) {
                 const Frame *f = &t.st[t.sp - 1];
-                int ok = target == D_CASUALTY ? f->kind == FR_CASUALTY && (hits < 0 || f->v[2] == hits) : target == D_ADVANCE ? tot == tot0 - !into : tot == tot0;
+                int ok = target == D_CASUALTY ? f->kind == FR_CASUALTY && (hits < 0 || f->v[2] == hits) : target == D_ADVANCE ? tot == tot0 - !into : target == D_SELF_HITS ? 1 : tot == tot0;
                 if (ok) { B->R.s = t; return 1; }
                 dbg[ND]++; break;
             }
@@ -1607,7 +1630,7 @@ static int bot_battle(Bot *B, const J *v, const J *dec, int target) {
             wotr_apply(&t, o[ch < 0 ? 0 : ch]);
         }
     }
-    if (target == D_ADVANCE && getenv("WOTR_BOT_DEBUG")) fprintf(stderr, "bot: advance not reached: stopped at own casualty %d, target but board differs %d, advance/extend %d\n", dbg[D_CASUALTY], dbg[ND], dbg[D_ADVANCE] + dbg[D_SIEGE_EXTEND]);
+    if (getenv("WOTR_BOT_DEBUG")) { fprintf(stderr, "bot: battle %s>%s not reached for engine question %d (decision %d): target but board differs %d; stopped at questions:", REGION_KEY[from], REGION_KEY[to], target, (int)B->n_dec, dbg[ND]); for (int k = 0; k < ND; k++) if (dbg[k]) fprintf(stderr, " %d x%d", k, dbg[k]); fprintf(stderr, "\n"); }
     return 0;
 }
 /* Our player's move in the position we hold, as one of the leaves; -1 if it is not among them. */
@@ -1633,6 +1656,7 @@ static void bot_applied(Bot *B) {       /* every answer of the chosen move is gi
     B->prev = before; memcpy(B->prevmv, B->pmv, sizeof B->prevmv); B->nprev = B->npmv; B->prev_ok = 1;
     for (int k = 0; k < B->npmv; k++) if (!s->winner) wotr_apply(s, B->pmv[k]);
     B->valid = !s->winner && s->dplayer == B->me && s->nrand == nr && chain_dkind(s->dkind);
+    if (B->cdiff && B->npmv > 0 && B->pmv[0].type == M_CHOICE) B->ca = *s;
     if (B->npmv > 0 && B->pmv[0].type == M_PLAY) { B->cb = before; B->ca = *s; B->cdiff = 1 + B->pmv[0].a; memset(B->cused, 0, sizeof B->cused); B->cused_eli = B->cused_reg = 0; }
     if (!B->valid && getenv("WOTR_BOT_DEBUG") && B->pmv[0].type == M_PLAY)
         fprintf(stderr, "bot: after playing %s our engine asks: winner %d, side %s, question %d, random draws %d, card asking %s\n", CARD_KEY[B->pmv[0].a], s->winner, SIDE_KEY[s->dplayer], s->dkind, (int)(s->nrand - nr), card_asking(s) >= 0 ? CARD_KEY[card_asking(s)] : "-");
@@ -1757,6 +1781,121 @@ static int bot_take(Bot *B, const Leaf *L, int nl, int i, int kind, const J *opt
     if (B->ipend == B->npend) bot_applied(B);
     return o;
 }
+static int find_answer(const J *opts, const char *ans) {            /* the option whose "answer" is this word, or -1 */
+    int pos = 0;
+    for (const J *x = opts ? opts->child : NULL; x; x = x->next, pos++) { const char *a = j_str(x, "answer"); if (a && !strcmp(a, ans)) return opt_number(x, pos); }
+    return -1;
+}
+static int find_pair(const J *opts, int from, int to) {             /* the option "from > to" (from < 0: any), or -1 */
+    int pos = 0;
+    for (const J *x = opts ? opts->child : NULL; x; x = x->next, pos++) {
+        int f = region_of(j_str(x, "from")), g = region_of(j_str(x, "to"));
+        if (g >= 0 && g == to && (from < 0 || f == from)) return opt_number(x, pos);
+    }
+    return -1;
+}
+/* A card's question that the site words in its own way. Our engine is at the same card's question with leaf i chosen;
+ * the choice is put in the site's words card by card, and played in our own picture. Returns the option, or -1. */
+static int card_map(Bot *B, Agent *ag, const Leaf *L, int i, int kind, const J *opts) {
+    State *s = &B->R.s;
+    if (i < 0 || L[i].nmv < 1 || L[i].mv[0].type != M_CHOICE) return -1;
+    Move m = L[i].mv[0], m2; int a = m.a, c = card_asking(s), dk = s->dkind, o = -1, two = 0; uint32_t nr = s->nrand;
+    const J *c0 = opts ? opts->child : NULL; const char *k0 = c0 ? j_str(c0, "kind") : NULL;
+    float bv; int n; char buf[200];
+    memset(&m2, 0, sizeof m2);
+    if (dk == D_CARD_OPTION) {
+        if (k0 && !strcmp(k0, "draw")) o = find_kv(opts, "draw", "deck", a ? "strategy" : "character");        /* the Palantir of Orthanc's bonus draw */
+        else if (c == CARD_THERE_IS_ANOTHER_WAY) o = find_answer(opts, a == 1 ? "hide" : a == 2 ? "move" : "skip");
+        else if (c == CARD_THE_BLACK_CAPTAIN_COMMANDS && find_answer(opts, "recruit") >= 0) o = find_answer(opts, a ? "move" : "recruit");
+        else if (c == CARD_THE_BLACK_CAPTAIN_COMMANDS || c == CARD_THE_RINGWRAITHS_ARE_ABROAD) o = find_answer(opts, a == 1 ? "move" : a == 2 ? "attack" : "skip");
+        else if (c == CARD_THE_LIDLESS_EYE) {
+            if (a == 255) o = find_answer(opts, "skip");
+            else for (int d = 0; d < B->R.nd[SH] && o < 0; d++) if (B->R.dice[SH][d].status == DS_AVAILABLE && B->R.dice[SH][d].face == a) { snprintf(buf, sizeof buf, "%d", d); o = find_answer(opts, buf); }
+        }
+    } else if (dk == D_CARD_REGION || dk == D_CARD_ARMY) {
+        if (a == 255) o = find_answer(opts, "skip");
+        else if (c == CARD_DREADFUL_SPELLS) o = find_pair(opts, -1, a);        /* the site: which Nazgul against which Army; ours: which Army */
+        else {                          /* the site asks "which Army goes where" at once; our engine asks the Army, then the region (or the other way round) */
+            State t = *s; wotr_apply(&t, m);
+            if (!t.winner && t.dplayer == B->me && (t.dkind == D_CARD_REGION || t.dkind == D_CARD_ARMY) && card_asking(&t) == c && t.nrand == nr) {
+                State cp = t; wotr_prune = 0; m2 = agent_choose(ag, &cp, &bv, &n);
+                if (m2.type == M_CHOICE && m2.a != 255) { if ((o = find_pair(opts, a, m2.a)) < 0) o = find_pair(opts, m2.a, a); two = o >= 0; }
+                if (o < 0) {            /* that pair is not on the site's list: of our engine's pairs that are, the one our network likes best */
+                    static Move m1s[MAXMOVES], m2s[MAXMOVES]; float best = 0; int n1 = wotr_moves(s, m1s), have = 0;
+                    for (int x = 0; x < n1 && x < 40; x++) {
+                        if (m1s[x].type != M_CHOICE || m1s[x].a == 255) continue;
+                        State u = *s; wotr_apply(&u, m1s[x]);
+                        if (u.winner || u.dplayer != B->me || (u.dkind != D_CARD_REGION && u.dkind != D_CARD_ARMY) || u.nrand != nr) continue;
+                        int n2 = wotr_moves(&u, m2s);
+                        for (int y = 0; y < n2 && y < 40; y++) {
+                            int oo; if (m2s[y].type != M_CHOICE || m2s[y].a == 255) continue;
+                            if ((oo = find_pair(opts, m1s[x].a, m2s[y].a)) < 0 && (oo = find_pair(opts, m2s[y].a, m1s[x].a)) < 0) continue;
+                            State w = u; wotr_apply(&w, m2s[y]); ag->has_root = 0;
+                            float val = agent_value(ag, &w); if (B->me == SH) val = -val;
+                            if (!have || val > best) { have = 1; best = val; o = oo; m = m1s[x]; m2 = m2s[y]; }
+                        }
+                    }
+                    two = o >= 0;
+                }
+            } else if (!t.winner && t.b.active && t.b.att == B->me && kind == K_CHOOSE_ATTACK) {      /* the card's attack, picked from our engine's list: the site asks from where to where */
+                int pos = 0;
+                for (const J *x = opts ? opts->child : NULL; x && o < 0; x = x->next, pos++) if (region_of(j_str(x, "from")) == t.b.src && region_of(j_str(x, "to")) == t.b.dst) o = opt_number(x, pos);
+            } else {                    /* our engine had only one place to send it, or one Army to send */
+                int pos = 0;
+                for (const J *x = opts ? opts->child : NULL; x && o < 0; x = x->next, pos++) if (region_of(j_str(x, "from")) == a && region_of(j_str(x, "to")) >= 0 && units(&t, B->me, region_of(j_str(x, "to"))) > units(s, B->me, region_of(j_str(x, "to")))) o = opt_number(x, pos);
+                if (o < 0) o = find_pair(opts, -1, a);
+            }
+        }
+    } else if (dk == D_CARD_COMP) {
+        int mask = a & 0x7F, lead = -1;
+        for (int k = 0; k < NCOMP; k++) if ((mask >> k) & 1 && lead < 0) lead = k;
+        if (a == 255) o = find_answer(opts, "skip");
+        else if (lead >= 0 && (a & 0x80)) {             /* a group on the map moves: our engine asks where next */
+            State t = *s; wotr_apply(&t, m);
+            if (!t.winner && t.dplayer == B->me && t.dkind == D_CARD_REGION && t.nrand == nr) {
+                State cp = t; wotr_prune = 0; m2 = agent_choose(ag, &cp, &bv, &n);
+                if (m2.type == M_CHOICE && m2.a < NREG) { snprintf(buf, sizeof buf, "\"kind\":\"move_companion\",\"character\":\"%s\",\"to\":\"%s\"}", comp_key(s, lead), REGION_KEY[m2.a]); two = (o = find_option(opts, buf)) >= 0; }
+            }
+        } else if (lead >= 0) {                         /* Companions leave the Fellowship: one by one, then where to, as in the Separate action */
+            State t = *s; wotr_apply(&t, m);
+            B->npend = 0;
+            for (int k = 0; k < NCOMP; k++) if ((mask >> k) & 1 && B->npend < MAXSTEP - 1) { Step *st = &B->pend[B->npend++]; st->kind = (uint8_t)kind; snprintf(st->text, sizeof st->text, "\"kind\":\"separate\",\"character\":\"%s\"}", CHAR_KEY[k]); }
+            B->npmv = 1; B->pmv[0] = m;
+            if (!t.winner && t.dplayer == B->me && t.dkind == D_SEP_DEST && t.nrand == nr) {
+                State cp = t; wotr_prune = 0; m2 = agent_choose(ag, &cp, &bv, &n);
+                Step *st = &B->pend[B->npend++]; st->kind = (uint8_t)kind; snprintf(st->text, sizeof st->text, "\"kind\":\"separate_to\",\"to\":\"%s\"}", REGION_KEY[m2.a]);
+                B->npmv = 2; B->pmv[1] = m2;
+            }
+            if ((o = find_answer(opts, "separate")) >= 0) {       /* a card that may also move a group on the map: first say which */
+                for (int k = 0; k < B->npend; k++) B->pend[k].kind = K_SEPARATE_COMPANIONS;
+                B->ipend = 0; return o;
+            }
+            if ((o = find_option(opts, B->pend[0].text)) < 0) { B->npend = B->ipend = B->npmv = 0; return -1; }
+            B->ipend = 1;
+            if (B->ipend == B->npend) bot_applied(B);
+            return o;
+        }
+    }
+    if (o < 0) return -1;
+    wotr_apply(s, m);
+    if (two && !s->winner) wotr_apply(s, m2);
+    B->valid = !s->winner && s->dplayer == B->me && s->nrand == nr && chain_dkind(s->dkind);
+    return o;
+}
+/* Our player's move is not on the site's list (it wanted to stop where the site makes it go on, say): of the leaves the
+ * site does offer, the one whose position our network likes best. */
+static int best_offered(Bot *B, Agent *ag, const Leaf *L, int nl, int kind, const J *opts) {
+    int bi = -1; float bv = 0;
+    for (int i = 0; i < nl && i < 600; i++) {
+        if (L[i].nstep <= 0 || L[i].st[0].kind != kind || find_option(opts, L[i].st[0].text) < 0) continue;
+        State t = B->R.s;
+        for (int k = 0; k < L[i].nmv && !t.winner; k++) wotr_apply(&t, L[i].mv[k]);
+        ag->has_root = 0;
+        float val = agent_value(ag, &t); if (B->me == SH) val = -val;
+        if (bi < 0 || val > bv) { bv = val; bi = i; }
+    }
+    return bi;
+}
 static int bot_decide(Bot *B, Agent *ag, const J *dec, const J *v) {
     static Leaf *L; if (!L) L = malloc(sizeof(Leaf) * MAXLEAF);
     const J *opts = j_get(dec, "options");
@@ -1775,6 +1914,7 @@ static int bot_decide(Bot *B, Agent *ag, const J *dec, const J *v) {
         /* the referee asks something else: if only the "which units" answers were left, the move is made as far as we are concerned */
         int only = B->ipend > 0;
         for (int k = B->ipend; k < B->npend; k++) only &= B->pend[k].kind == K_ARMY_SELECTION || B->pend[k].kind == K_JOIN_GROUP;
+        if (!only && getenv("WOTR_BOT_DEBUG") && B->npmv > 0 && B->pmv[0].type == M_ARMY) { Move pm = B->pmv[0]; fprintf(stderr, "bot: decision %d, the Army move %s>%s we planned: our picture has there Free Peoples %d, Shadow %d; at war: Isengard %d Rohan %d; move fields c %d d %d e %d f %d\n", (int)B->n_dec, REGION_KEY[pm.a], REGION_KEY[pm.b], units(&B->R.s, FP, pm.b), units(&B->R.s, SH, pm.b), B->R.s.pol[ISENGARD] == 0, B->R.s.pol[ROHAN] == 0, pm.c, pm.d, pm.e, pm.f); }
         if (only) bot_applied(B); else { fprintf(stderr, "bot: expected %s (%s), asked %s; plan dropped\n", KIND_KEY[B->pend[B->ipend].kind], B->pend[B->ipend].text, kind >= 0 ? KIND_KEY[kind] : "?"); B->npend = B->ipend = 0; B->valid = 0; B->n_nomatch++; }
     }
     if (kind == K_ACTION) {             /* a fresh picture from the view */
@@ -1783,7 +1923,21 @@ static int bot_decide(Bot *B, Agent *ag, const J *dec, const J *v) {
         B->valid = !bot_view(B, v, B->me, err, sizeof err);
         if (!B->valid) { B->n_rebuild_fail++; fprintf(stderr, "bot: cannot rebuild the position (turn %d): %s\n", j_int(v, "turn", 0), err); }
     }
-    if (B->valid && !B->R.s.winner && B->R.s.dplayer == B->me && (kind == K_ACTION || kind == K_ARMY_MOVE || kind == K_RECRUIT || kind == K_MOVE_COMPANIONS || kind == K_MOVE_MINIONS || kind == K_SEPARATE_COMPANIONS || kind == K_CARD_CHOICE)) {
+    if (kind == K_CARD_CHOICE && j_len(opts) > 1) {
+        const char *q = j_str(j_get(dec, "context"), "question");
+        if (q && !strncmp(q, "Which way", 9)) { B->n_chain++; return opt_number(opts->child, 0); }                             /* the route of a move already chosen: the first, shortest */
+        if (q && !strncmp(q, "Move Isengard units from Dunland", 32) && (o = find_answer(opts, "skip")) >= 0) { B->n_chain++; return o; }     /* our engine plays the card without this move */
+    }
+    if (kind == K_CHOOSE_ATTACK && (B->valid || B->cdiff) && !B->R.s.winner && B->R.s.b.active && B->R.s.b.att == B->me) {       /* a card's attack our engine has already begun: name it */
+        int pos = 0, alt = -1;
+        for (const J *x = opts ? opts->child : NULL; x; x = x->next, pos++) if (region_of(j_str(x, "from")) == B->R.s.b.src && region_of(j_str(x, "to")) == B->R.s.b.dst) { const J *al = j_get(x, "all"); if (al && al->num != 0) { B->n_chain++; return opt_number(x, pos); } if (alt < 0) alt = opt_number(x, pos); }
+        if (alt >= 0) { B->n_chain++; return alt; }
+    }
+    {   /* the site goes on asking for more of a move our engine has already ended (more Nazgul, say): end it, and stay in step */
+        int want = kind == K_MOVE_MINIONS ? D_NAZ_MOVE : kind == K_ARMY_MOVE ? D_ARMY_MOVE2 : kind == K_RECRUIT ? D_MUSTER2 : kind == K_MOVE_COMPANIONS ? D_COMP_MOVE : -1;
+        if (want >= 0 && B->valid && !B->R.s.winner && B->R.s.dplayer == B->me && B->R.s.dkind != want && B->R.s.dkind != D_ACTION && (o = find_kind(opts, "end")) >= 0) { B->n_chain++; return o; }
+    }
+    if (B->valid && !B->R.s.winner && B->R.s.dplayer == B->me && (kind == K_ACTION || kind == K_ARMY_MOVE || kind == K_RECRUIT || kind == K_MOVE_COMPANIONS || kind == K_MOVE_MINIONS || kind == K_SEPARATE_COMPANIONS || kind == K_CARD_CHOICE || (kind == K_CHOOSE_ATTACK && B->R.s.dkind == D_CARD_ARMY))) {
         wotr_prune = 0;
         int nl = build_leaves(&B->R, L);
         if (kind == K_ACTION) {         /* do we list the same options as the referee? (its fingerprint tells) */
@@ -1798,6 +1952,8 @@ static int bot_decide(Bot *B, Agent *ag, const J *dec, const J *v) {
         int i = !nl ? -1 : B->R.s.dkind == D_NAZ_MOVE ? naz_pick(B, ag, L, nl) : -2;
         if (i == -2) i = bot_pick(B, ag, L, nl);
         if ((o = bot_take(B, L, nl, i, kind, opts)) >= 0) { B->n_engine++; return o; }
+        if (kind != K_ACTION && (o = card_map(B, ag, L, i, kind, opts)) >= 0) { B->ca = B->R.s; B->n_engine++; return o; }
+        if (kind != K_ACTION && kind != K_CARD_CHOICE && (o = bot_take(B, L, nl, best_offered(B, ag, L, nl, kind, opts), kind, opts)) >= 0) { B->n_engine++; return o; }
         if (kind == K_ACTION && B->me == SH && !B->R.s.mouth_used) {       /* the Mouth of Sauron's die may be spent already this turn: the view does not say */
             B->R.s.mouth_used = 1; wotr_prune = 0;
             nl = build_leaves(&B->R, L); i = nl ? bot_pick(B, ag, L, nl) : -1;
@@ -1815,10 +1971,18 @@ static int bot_decide(Bot *B, Agent *ag, const J *dec, const J *v) {
             int i = bot_pick(B, ag, L, nl);
             if (i >= 0 && L[i].nstep > 0 && (o = find_option(opts, L[i].st[0].text)) >= 0) { wotr_apply(&B->F, L[i].mv[0]); B->n_hunt++; return o; }
         }
+        {   int any = 0; for (int j = 0; j < nl && !any; j++) any = L[j].nstep > 0 && L[j].st[0].kind == kind;     /* the same kind of question with other options: the best the site offers */
+            int i = any ? best_offered(B, ag, L, nl, kind, opts) : -1;
+            if (i >= 0 && (o = find_option(opts, L[i].st[0].text)) >= 0) { wotr_apply(&B->F, L[i].mv[0]); B->n_hunt++; return o; } }
     }
-    if (B->follow && kind == K_CHOOSE_GUIDE && !B->valid && B->F.guide < NCOMP && (o = find_kv(opts, "guide", "character", CHAR_KEY[B->F.guide])) >= 0) { B->n_hunt++; return o; }   /* our engine names the new Guide without asking */
+    if (B->follow && kind == K_CHOOSE_GUIDE && !B->valid) {         /* the new Guide: our engine names him without asking, or asks after "where do the separated go" (the site asks that later) */
+        State t = B->F; float bv; int n; int g;
+        for (int stp = 0; stp < 3 && !t.winner && t.dplayer == B->me && t.dkind == D_SEP_DEST; stp++) { State cp = t; wotr_prune = 0; Move m = agent_choose(ag, &cp, &bv, &n); wotr_apply(&t, m); }
+        if (!t.winner && t.dplayer == B->me && t.dkind == D_GUIDE) { State cp = t; wotr_prune = 0; g = agent_choose(ag, &cp, &bv, &n).a; } else g = t.guide;
+        if (g < NCOMP && (o = find_kv(opts, "guide", "character", CHAR_KEY[g])) >= 0) { B->n_hunt++; return o; }
+    }
     if (B->follow && kind != K_ACTION && getenv("WOTR_BOT_DEBUG")) fprintf(stderr, "bot: decision %d (%s) does not follow our Hunt answer: our engine has winner %d, side %s, question %d, guide %d\n", (int)B->n_dec, kind >= 0 ? KIND_KEY[kind] : "?", B->F.winner, SIDE_KEY[B->F.dplayer], B->F.dkind, B->F.guide);
-    B->follow = 0;
+    if (kind != K_GUIDE_ABILITY && kind != K_CHOOSE_GUIDE && kind != K_HUNT_CASUALTY) B->follow = 0;
     if (kind == K_GUIDE_ABILITY && j_len(opts) > 1 && bot_hunt(B, dec, D_HUNT_RESPONSE)) {      /* our engine asks this inside its one Hunt question */
         wotr_prune = 0;
         int nl = build_leaves(&B->R, L), has = 0, i;
@@ -1826,11 +1990,52 @@ static int bot_decide(Bot *B, Agent *ag, const J *dec, const J *v) {
         B->valid = 0;
         if (has && (i = bot_pick(B, ag, L, nl)) >= 0 && (o = find_kind(opts, strstr(L[i].st[0].text, "\"guide_ability\"") ? "use" : "skip")) >= 0) { B->n_hunt++; return o; }
     }
+    if (kind == K_ARMY_SELECTION && j_len(opts) > 1 && j_str(j_get(dec, "context"), "character") && !strcmp(j_str(j_get(dec, "context"), "character"), "saruman") && (o = find_kv(opts, "count", "character", "saruman")) >= 0) {
+        int pos = 0;        /* Saruman never leaves Orthanc */
+        for (const J *x = opts->child; x; x = x->next, pos++) if (j_int(x, "count", -1) == 0) { B->n_chain++; return opt_number(x, pos); }
+    }
     if (kind == K_ARMY_SELECTION && B->sel_on && j_len(opts) > 1) {      /* the part of the Army our attack takes; Leaders and characters all go */
         const J *cx = j_get(dec, "context"); const char *u = j_str(cx, "unit"); int av = j_int(cx, "available", 99), pos = 0;
         int *left = u && !strcmp(u, "regular") ? &B->sel_reg : u && !strcmp(u, "elite") ? &B->sel_eli : NULL;
         int want = left ? (*left < av ? *left : av) : av;
+        const char *ch = j_str(cx, "character");
+        if (ch) want = strcmp(ch, "saruman") ? 1 : 0;
+        if (!left && !ch && av == 99) for (const J *x = opts->child; x; x = x->next) if (j_int(x, "count", -1) > (want == 99 ? -1 : want)) want = j_int(x, "count", -1);
         for (const J *x = opts->child; x; x = x->next, pos++) if (j_int(x, "count", -1) == want) { if (left) *left -= want; B->n_chain++; return opt_number(x, pos); }
+    }
+    if (kind == K_CARD_CHOICE && j_len(opts) > 1) {
+        const J *cx = j_get(dec, "context"), *btl = j_get(v, "battle"); const char *q = j_str(cx, "question"); int cc = card_of(j_str(cx, "card")), pos = 0;
+        if (btl && btl->type == J_OBJ && q) {            /* a Combat card's own question */
+            if (strstr(q, "hits on your own") && bot_battle(B, v, dec, D_SELF_HITS)) {
+                wotr_prune = 0;
+                int nl = build_leaves(&B->R, L), i = nl ? bot_pick(B, ag, L, nl) : -1;
+                B->valid = 0;
+                if (i >= 0 && L[i].nstep > 0 && (o = find_option(opts, L[i].st[0].text)) >= 0) { B->n_battle++; return o; }
+            }
+            if (strstr(q, "Leadership?")) {              /* our engine always forfeits all the card allows */
+                int bc = -1; o = -1;
+                for (const J *x = opts->child; x; x = x->next, pos++) { int c = j_int(x, "count", -1); if (c > bc) { bc = c; o = opt_number(x, pos); } }
+                if (o >= 0) { B->n_battle++; return o; }
+            }
+            if (strstr(q, "Eliminate a Leader")) {       /* a Leader is given, a Companion is not; the Shadow takes what is offered */
+                for (const J *x = opts->child; x; x = x->next, pos++) { const char *an = j_str(x, "answer"); if (an && (!strncmp(an, "LEADER", 6) || (B->me == SH && strcmp(an, "skip")))) { B->n_battle++; return opt_number(x, pos); } }
+                if ((o = find_answer(opts, "skip")) >= 0) { B->n_battle++; return o; }
+            }
+        } else if (B->me == FP) {                        /* the cards against the Hunt: our engine asks these inside its Hunt */
+            int tgt = cc == CARD_MITHRIL_COAT_AND_STING ? D_MITHRIL : cc == CARD_WIZARDS_STAFF ? D_STAFF : cc < 0 && j_get(cx, "damage") ? D_HUNT_RESPONSE : -1;
+            if (tgt >= 0 && bot_hunt(B, dec, tgt)) {
+                wotr_prune = 0;
+                int nl = build_leaves(&B->R, L), i = nl ? bot_pick(B, ag, L, nl) : -1;
+                B->valid = 0;
+                if (i >= 0 && L[i].nstep > 0) {
+                    o = -1;
+                    if (tgt == D_HUNT_RESPONSE) o = find_option(opts, L[i].st[0].text);
+                    else if (strstr(L[i].st[0].text, "\"yes\":true")) for (const J *x = opts->child; x && o < 0; x = x->next, pos++) if (j_str(x, "target_card")) o = opt_number(x, pos);
+                    if (o < 0) o = find_answer(opts, "skip");
+                    if (o >= 0) { B->n_hunt++; return o; }
+                }
+            }
+        }
     }
     {   /* a question inside a battle: set the engine down in it and let our player answer */
         int target = kind == K_COMBAT_CARD ? D_BATTLE_CARD : kind == K_CASUALTY ? D_CASUALTY : kind == K_FIELD_OR_SIEGE ? D_SIEGE_RETREAT : kind == K_CEASE_ATTACK ? D_CONTINUE
@@ -1840,6 +2045,7 @@ static int bot_decide(Bot *B, Agent *ag, const J *dec, const J *v) {
             int nl = build_leaves(&B->R, L), i = nl ? bot_pick(B, ag, L, nl) : -1;
             B->valid = 0;
             if (i >= 0 && L[i].nstep > 0 && (o = find_option(opts, L[i].st[0].text)) >= 0) { B->n_battle++; return o; }
+            if (i >= 0 && kind == K_ADVANCE && strstr(L[i].st[0].text, "\"advance\"") && (o = find_kind(opts, "advance")) >= 0) { B->n_battle++; return o; }      /* the whole Army may not fit: as much as goes */
             B->n_nomatch++;
             fprintf(stderr, "bot: battle question %s: our answer is not among the referee's options (%s)\n", KIND_KEY[kind], i >= 0 && L[i].nstep ? L[i].st[0].text : "none");
         } else if (target >= 0 && j_len(opts) > 1) B->n_battle_miss++;
@@ -1887,6 +2093,7 @@ static int bot_decide(Bot *B, Agent *ag, const J *dec, const J *v) {
         int nl = build_leaves(&B->R, L), i = nl ? bot_pick(B, ag, L, nl) : -1;
         B->valid = 0;
         if (i >= 0 && L[i].nstep > 0 && (o = find_option(opts, L[i].st[0].text)) >= 0) { B->n_hunt++; return o; }
+        if ((o = card_map(B, ag, L, i, kind, opts)) >= 0) { B->valid = 0; B->n_hunt++; return o; }
     }
     if (kind == K_CARD_CHOICE && j_len(opts) > 1 && B->cdiff && card_of(j_str(j_get(dec, "context"), "card")) == B->cdiff - 1) {
         /* a question about the card we just played that our engine settled by itself: answer as the engine did, read off its board before and after */
@@ -1903,6 +2110,24 @@ static int bot_decide(Bot *B, Agent *ag, const J *dec, const J *v) {
         }
         if (bo >= 0) { if (br >= 0) B->cused[br]++; else if (br == -2) B->cused_eli++; else B->cused_reg++; B->n_chain++; return bo; }
     }
+    if (kind == K_CARD_CHOICE && j_len(opts) > 1 && j_str(opts->child, "kind") && !strcmp(j_str(opts->child, "kind"), "draw")) {
+        /* a bonus card from either deck: the deck whose cards, one by one in our hand, our network likes best on average */
+        char err[200];
+        if (!bot_view(B, v, B->me, err, sizeof err)) {
+            int pos = 0, bo = -1; float bv = 0;
+            B->valid = 0;
+            for (const J *x = opts->child; x; x = x->next, pos++) {
+                const char *dk = j_str(x, "deck"); int deck = (B->me == SH ? 2 : 0) + (dk && !strcmp(dk, "strategy")), k = 0; float sum = 0;
+                for (int c = 0; c < NCARD; c++) if (CARD_DECK(c) == deck && B->R.s.card_where[c] == W_DECK) {
+                    State t = B->R.s; t.card_where[c] = W_HAND; t.hand_n[CARD_SIDE(c)]++;
+                    ag->has_root = 0;
+                    float val = agent_value(ag, &t); sum += B->me == SH ? -val : val; k++;
+                }
+                if (k && (bo < 0 || sum / (float)k > bv)) { bv = sum / (float)k; bo = opt_number(x, pos); }
+            }
+            if (bo >= 0) { B->n_turn++; return bo; }
+        }
+    }
     if (kind == K_DISCARD_EXCESS_CARD && j_len(opts) > 1) {       /* the discard that leaves the position our network likes best */
         char err[200];
         if (!bot_view(B, v, B->me, err, sizeof err)) {
@@ -1917,6 +2142,29 @@ static int bot_decide(Bot *B, Agent *ag, const J *dec, const J *v) {
             }
             if (bo >= 0) { B->n_turn++; return bo; }
         }
+    }
+    if (kind == K_SEPARATE_COMPANIONS && j_len(opts) > 1 && find_kind(opts, "separate_to") >= 0) {
+        /* where a Companion who leaves the Fellowship goes, when our own picture did not see him leave (the Hunt took him at random):
+           he is set down in each region on offer and our network judges the board */
+        char err[200];
+        if (!bot_view(B, v, B->me, err, sizeof err)) {
+            static const uint8_t order[NCOMP] = { C_MERRY, C_PIPPIN, C_GIMLI, C_LEGOLAS, C_BOROMIR, C_STRIDER, C_GANDALF };
+            const J *cl = j_get(j_get(v, "fellowship"), "companions"); int c = -1, pos = 0, bo = -1; float bv = 0;
+            B->valid = 0;
+            for (int k = 0; k < NCOMP && c < 0; k++) {
+                int in = 0; for (const J *x = cl ? cl->child : NULL; x; x = x->next) in |= x->type == J_STR && !strcmp(x->str, CHAR_KEY[k]);
+                if (!in && B->prev_ok && B->prev.comp_loc[k] == LOC_FSP && B->R.s.comp_loc[k] >= NREG) c = k;
+            }
+            for (int k = 0; k < NCOMP && c < 0; k++) if (B->R.s.comp_loc[order[k]] == LOC_FSP && order[k] != B->R.s.guide) c = order[k];
+            for (const J *x = opts->child; x && c >= 0; x = x->next, pos++) {
+                const char *kk = j_str(x, "kind"); int r = region_of(j_str(x, "to")); if (!kk || strcmp(kk, "separate_to") || r < 0) continue;
+                State t = B->R.s; t.comp_loc[c] = (uint8_t)r; ag->has_root = 0;
+                float val = agent_value(ag, &t);
+                if (bo < 0 || val > bv) { bv = val; bo = opt_number(x, pos); }
+            }
+            if (bo >= 0) { B->n_hunt++; return bo; }
+        }
+        if ((o = find_kind(opts, "separate_to")) >= 0) { B->n_rule++; B->n_rule_kind[kind]++; return o; }
     }
     o = bot_rule(B, kind, dec, v);
     if (j_len(opts) > 1 && getenv("WOTR_BOT_DEBUG")) {
