@@ -49,9 +49,9 @@ void fr_game(State *s, Frame *f) {
         ASK(D_HUNT_ALLOC, SH);
         s->hunt_sh = s->mv.a;
         /* 4: action roll */
-        for (int i = pool_size(s, FP); i > 0; i--) s->dice[FP][FPF[rnd(s, 6)]]++;
+        for (int i = pool_size(s, FP); i > 0; i--) s->dice[FP][FPF[rndk(s, 6, 1)]]++;
         for (int i = pool_size(s, SH) - s->hunt_sh; i > 0; i--) {
-            int face = SHF[rnd(s, 6)];
+            int face = SHF[rndk(s, 6, 2)];
             if (face == F_SPECIAL) s->hunt_sh++; else s->dice[SH][face]++;
         }
         /* 5: action resolution */

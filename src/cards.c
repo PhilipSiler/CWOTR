@@ -55,7 +55,11 @@ static int woses_dest(const State *s, int r) {
     return DIST[r][R_MINAS_TIRITH] == 1 && can_enter_army(s, FP, r, r);
 }
 static void rec_unit(State *s, int r, int n) { if (!recruit(s, r, n, 1)) recruit(s, r, n, 0); }
-static void rec_n(State *s, int r, int n, int k) { if (free_for_recruit(s, NAT_SIDE(n), r)) for (int i = 0; i < k; i++) recruit(s, r, n, 0); }
+static void rec_n(State *s, int r, int n, int k) {
+    int k0 = s->rec_n;
+    if (free_for_recruit(s, NAT_SIDE(n), r)) for (int i = 0; i < k; i++) recruit(s, r, n, 0);
+    for (int i = k0; i < s->rec_n; i++) s->rec_eli[i] = 2;        /* Regulars the card names: no choice (the log for a client) */
+}
 static int attack_list(const State *s, int filter, Move *out) {
     Move z; memset(&z, 0, sizeof z); z.type = M_ATTACK;
     Move tmp[MAXMOVES];
@@ -493,7 +497,7 @@ void fr_cardfx(State *s, Frame *f) {
         if (s->guide == GOLLUM || !fsp_comps(s)) add_corruption(s, 1);
         else {
             {
-                int m = fsp_comps(s), k = (int)rnd(s, (uint32_t)__builtin_popcount((unsigned)m)), x = 0;
+                int m = fsp_comps(s), k = (int)rndk(s, (uint32_t)__builtin_popcount((unsigned)m), 6), x = 0;
                 for (; x < NCOMP; x++) if ((m >> x) & 1 && k-- == 0) break;
                 f->v[1] = (uint8_t)x;
             }
@@ -695,8 +699,10 @@ void fr_cardfx(State *s, Frame *f) {
                 {
                     int from = s->mv.a, to = f->v[1], k = 4 - f->v[2];
                     f->v[3] |= (uint8_t)(from == R_NORTH_DUNLAND ? 1 : 2);
-                    while (k > 0 && s->eli[from][ISENGARD]) { s->eli[from][ISENGARD]--; s->eli[to][ISENGARD]++; k--; f->v[2]++; }
-                    while (k > 0 && s->reg[from][ISENGARD]) { s->reg[from][ISENGARD]--; s->reg[to][ISENGARD]++; k--; f->v[2]++; }
+                    s->reloc_on = 1; s->reloc_from = (uint8_t)from; s->reloc_to = (uint8_t)to; s->reloc_naz = 0;
+                    memset(s->reloc_reg, 0, sizeof s->reloc_reg); memset(s->reloc_eli, 0, sizeof s->reloc_eli); memset(s->reloc_ldr, 0, sizeof s->reloc_ldr);
+                    while (k > 0 && s->eli[from][ISENGARD]) { s->eli[from][ISENGARD]--; s->eli[to][ISENGARD]++; s->reloc_eli[ISENGARD]++; k--; f->v[2]++; }
+                    while (k > 0 && s->reg[from][ISENGARD]) { s->reg[from][ISENGARD]--; s->reg[to][ISENGARD]++; s->reloc_reg[ISENGARD]++; k--; f->v[2]++; }
                     fix_siege(s, from);
                 }
             }

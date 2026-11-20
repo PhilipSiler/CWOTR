@@ -164,6 +164,8 @@ typedef struct State {
     uint8_t stat_tiles;              /* Hunt tiles drawn so far */
     uint8_t stat_vp_walk[2], stat_vp_fight[2];   /* enemy VP taken by walking into an empty settlement / by battle or siege (never decremented) */
     uint8_t mithril_tile, mithril_frame;   /* Mithril Coat and Sting: the first tile (+1) held out of the pool until the Hunt of frame mithril_frame ends */
+    uint8_t reloc_on, reloc_from, reloc_to, reloc_reg[NNAT], reloc_eli[NNAT], reloc_ldr[NFPNAT], reloc_naz;   /* the last whole-Army move of a card (for a client following a referee: its split) */
+    uint8_t rec_n, rec_r[8], rec_nat[8], rec_eli[8];   /* the units recruited lately (for a client following a referee: its Regular, Elite or none) */
     uint8_t hunt_drawn;              /* the tile a HF_DRAW_ONLY Hunt drew (255: none, e.g. Wizard's Staff) */
     uint8_t naz_moved[NREG];         /* Nazgul that have moved into each region in this action: each Nazgul moves once, the others may still go */
     uint8_t naz_only;               /* a card moves "the Nazgul" (the Witch-king among them): not the Mouth of Sauron */
@@ -207,14 +209,22 @@ void pop(State *s);
 #define CALL(expr) CALL_(expr, __COUNTER__ + 1)
 
 /* rng */
-static inline uint32_t rnd(State *s, uint32_t n) {
+extern uint32_t (*wotr_rnd_hook)(struct State *s, uint32_t n, int kind);
+extern int wotr_rk_d6, wotr_draw_deck;
+static inline uint32_t rnd_own(State *s, uint32_t n);
+static inline uint32_t rndk(State *s, uint32_t n, int kind) {
+    if (wotr_rnd_hook && !s->rng_max) { s->nrand++; return wotr_rnd_hook(s, n, kind); }
+    return rnd_own(s, n);
+}
+static inline uint32_t rnd(State *s, uint32_t n) { return rndk(s, n, 0); }
+static inline uint32_t rnd_own(State *s, uint32_t n) {
     if (s->rng_max) { s->nrand++; return n - 1; }
     uint64_t z = (s->rng += 0x9E3779B97F4A7C15ULL);
     z = (z ^ (z >> 30)) * 0xBF58476D1CE4E5B9ULL; z = (z ^ (z >> 27)) * 0x94D049BB133111EBULL; z ^= z >> 31;
     s->nrand++;
     return (uint32_t)(((z >> 32) * n) >> 32);
 }
-static inline int d6(State *s) { return (int)rnd(s, 6) + 1; }
+static inline int d6(State *s) { return (int)rndk(s, 6, wotr_rk_d6) + 1; }
 
 /* core.c */
 static inline int orig_side(int r) { return REGION[r].nation == NO_NATION ? 2 : NAT_SIDE(REGION[r].nation); }
