@@ -442,6 +442,65 @@ static int roll_choose(Agent *a, const State *det, const Move *mv, int n, int po
     return bi;
 }
 
+/* ---- Gumbel search at the root (Danihelka et al. 2022, "Policy improvement by planning with Gumbel") ----
+   WOTR_GUM_FP / WOTR_GUM_SH = "n,k,scale,noise,prior": at an action decision of that side, n evaluations are spent on k
+   moves. The k are the moves with the largest (log-probability the move-suggesting network gives them + noise * a Gumbel
+   random number); the worse half is dropped after each of log2(k) equal rounds; moves are ranked, and the survivor
+   chosen, by  prior + noise + (50 + most evaluations any move has had) * scale * (its average chance of winning).
+   One evaluation plays the move with its own dice (the j-th of every move has the same dice) and scores what follows:
+   by the look-ahead when Agent.depth > 1, else one step ahead. prior: 0 the self-play suggester, 1 the taught one.
+   extra[] (nudges and the lean, log-odds, Free Peoples' view) is added to each evaluation. On return cand[] marks the
+   k moves and val[] holds the log-odds of their averages; the index of the chosen move is returned. */
+static float gum_cfg[2][5] = {{0, 8, 1, 0, 0}, {0, 8, 1, 0, 0}};
+static void gum_init(void) {
+    static int read; if (read) return;
+    const char *v;
+    if ((v = getenv("WOTR_GUM_FP"))) sscanf(v, "%f,%f,%f,%f,%f", &gum_cfg[FP][0], &gum_cfg[FP][1], &gum_cfg[FP][2], &gum_cfg[FP][3], &gum_cfg[FP][4]);
+    if ((v = getenv("WOTR_GUM_SH"))) sscanf(v, "%f,%f,%f,%f,%f", &gum_cfg[SH][0], &gum_cfg[SH][1], &gum_cfg[SH][2], &gum_cfg[SH][3], &gum_cfg[SH][4]);
+    read = 1;
+}
+long agent_gum_evals, agent_gum_decisions;
+static int gumbel_choose(Agent *a, const State *det, const Move *mv, int n, int pov, uint64_t seed, const float *lp, const float *extra, float *val, uint8_t *cand) {
+    const float *c = gum_cfg[pov];
+    int N = (int)c[0], k = (int)c[1], idx[64], cnt[64], na = 0, total = 0; double sum[64]; float base[64];
+    if (k > 64) k = 64;
+    if (k < 2) k = 2;
+    for (int i = 0; i < n; i++) {                                      /* the k largest of prior + noise, best first */
+        if (!cand[i]) continue;
+        double u = unif(&a->rng); if (u < 1e-12) u = 1e-12;
+        float x = lp[i] + (c[3] > 0 ? c[3] * (float)-log(-log(u)) : 0); int j;
+        if (na < k) j = na++; else if (x > base[k - 1]) j = k - 1; else continue;
+        while (j > 0 && base[j - 1] < x) { base[j] = base[j - 1]; idx[j] = idx[j - 1]; j--; }
+        base[j] = x; idx[j] = i;
+    }
+    int nk = na, rounds = 0; for (int x = na; x > 1; x = (x + 1) / 2) rounds++;
+    for (int j = 0; j < nk; j++) { sum[j] = 0; cnt[j] = 0; }
+    int alive[64]; for (int j = 0; j < nk; j++) alive[j] = j;
+    for (int rd = 0; rd < rounds; rd++) {
+        int m = N / (rounds * na); if (m < 1) m = 1;
+        for (int r = 0; r < m; r++) for (int q = 0; q < na; q++) {
+            int j = alive[q], i = idx[j]; float v; uint64_t sd = seed + (uint64_t)cnt[j] * 0x632BE59BD9B4E019ULL;
+            if (a->depth > 1) { State u = *det; u.rng = sd; wotr_apply(&u, mv[i]); v = deep(a, &u, pov, a->depth - 1, det->turn, 1); }
+            else v = eval_move(a, det, mv[i], pov, 0, sd, 1);
+            double p = 1.0 / (1.0 + exp(-(double)(v + extra[i])));
+            sum[j] += pov == FP ? p : 1 - p; cnt[j]++; total++;
+        }
+        int mc = 0; for (int q = 0; q < na; q++) if (cnt[alive[q]] > mc) mc = cnt[alive[q]];
+        #define GSC(j) (base[j] + (50.0f + (float)mc) * c[2] * (float)(sum[j] / cnt[j]))
+        for (int x = 0; x < na; x++) for (int y = x + 1; y < na; y++) if (GSC(alive[y]) > GSC(alive[x])) { int t = alive[x]; alive[x] = alive[y]; alive[y] = t; }
+        #undef GSC
+        na = (na + 1) / 2;
+    }
+    memset(cand, 0, (size_t)n);
+    for (int j = 0; j < nk; j++) {
+        double p = sum[j] / cnt[j]; if (pov != FP) p = 1 - p;
+        if (p < 1e-4) p = 1e-4; if (p > 1 - 1e-4) p = 1 - 1e-4;
+        val[idx[j]] = (float)log(p / (1 - p)); cand[idx[j]] = 1;
+    }
+    __atomic_add_fetch(&agent_gum_evals, total, __ATOMIC_RELAXED); __atomic_add_fetch(&agent_gum_decisions, 1, __ATOMIC_RELAXED);
+    return idx[alive[0]];
+}
+
 Move agent_choose(Agent *a, const State *s, float *best_v, int *n_moves) {
     Move *mv = a->last_mv; float *val = a->last_val;
     int n = wotr_moves(s, mv), pov = s->dplayer;
@@ -557,7 +616,24 @@ Move agent_choose(Agent *a, const State *s, float *best_v, int *n_moves) {
         }
     }
     int rolled = 0;
-    if ((a->roll_ms > 0 || a->roll_n > 0) && s->dkind == D_ACTION && !set) {
+    gum_init();
+    if (gum_cfg[pov][0] > 0 && s->dkind == D_ACTION && !set && a->last_ncand > 1) {
+        static _Thread_local float lp[MAXMOVES], extra[MAXMOVES];
+        const Policy *P = gum_cfg[pov][4] > 0 ? (a->dpol[pov] ? a->dpol[pov] : a->pol[pov]) : (a->pol[pov] ? a->pol[pov] : a->dpol[pov]);
+        if (P) {
+            float h[H1], mx = -1e30f, z = 0;
+            for (int j = 0; j < H1; j++) h[j] = a->acc[pov][j] > 0 ? a->acc[pov][j] : 0;
+            pol_logits(P, h, s->dkind, mv, n, lp);
+            for (int i = 0; i < n; i++) if (lp[i] > mx) mx = lp[i];
+            for (int i = 0; i < n; i++) z += expf(lp[i] - mx);
+            z = mx + logf(z);
+            for (int i = 0; i < n; i++) lp[i] -= z;
+        } else memset(lp, 0, sizeof(float) * (size_t)n);
+        for (int i = 0; i < n; i++) extra[i] = nudge_share(a->vnet[pov]->p.alpha) * lane_guard(s, mv[i], n) + (use_hum ? hum[i] : 0);
+        bi = gumbel_choose(a, &det, mv, n, pov, seed, lp, extra, val, cand); best = val[bi];
+        rolled = 1; a->last_deep = 1; memcpy(a->last_followed, cand, (size_t)n);
+    }
+    if (!rolled && (a->roll_ms > 0 || a->roll_n > 0) && s->dkind == D_ACTION && !set) {
         /* the rollout chooser: shortlist the best `roll_k` moves by the one-step scores, then let rollouts decide */
         int kept[64], nk = 0, w = a->roll_k > 0 && a->roll_k <= 64 ? a->roll_k : 12;
         uint8_t used[MAXMOVES]; memset(used, 0, (size_t)n);
