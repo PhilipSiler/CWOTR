@@ -19,7 +19,7 @@ bridge_check: bridge.c $(ENGINE) $(AI) $(HDRS)
 # Hambot as a bot: it joins a referee (the BehindMedia site, or `cli referee`); README.md, "Playing on the BehindMedia
 # site". Without -march=native, so the program runs on any machine of its architecture (a tournament's image).
 hambot: hambot.c bridge.c $(ENGINE) $(AI) $(HDRS)
-	$(CC) -O3 -ffast-math -std=gnu11 -Wall -Wno-unused-function -Wno-unused-parameter -Wno-unused-variable -I$(S) -o $@ hambot.c $(AI) $(ENGINE) -lm
+	$(CC) -O3 -ffast-math -std=gnu11 -Wall -Wno-unused-function -Wno-unused-parameter -Wno-unused-variable -iquote $(S) -o $@ hambot.c $(AI) $(ENGINE) -lm
 
 test: bridge_check
 	./bridge_check names $(VOCAB)
