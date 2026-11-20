@@ -529,7 +529,7 @@ static void view_json(Buf *b, const Ref *R, int pov) {
         bput(b, "\"%s\":{\"control\":", REGION_KEY[r]);
         if (is_settlement(r) && s->ctrl[r] < 2) bput(b, "\"%s\",", SIDE_KEY[s->ctrl[r]]); else bput(b, "null,");
         view_units(b, s, r);
-        bput(b, ",\"siege\":%s}", s->siege[r] ? "true" : "false");
+        if (s->siege[r] && s->ctrl[r] < 2) bput(b, ",\"siege\":\"%s\"}", SIDE_KEY[s->ctrl[r]]); else bput(b, ",\"siege\":false}");   /* as the reference: the besieged side, or false */
     }
     bput(b, "},\"politics\":{");
     for (int n = 0; n < NNAT; n++) { bcomma(b); bput(b, "\"%s\":{\"step\":%d,\"active\":%s}", NATION_KEY[n], s->pol[n], s->active[n] ? "true" : "false"); }
@@ -1357,7 +1357,7 @@ static int bot_view(Bot *B, const J *v, int who, char *err, int en) {      /* wh
         int r = region_of(e->key); if (r < 0) continue;
         int cs = side_of(j_str(e, "control"));
         if (is_settlement(r) && cs >= 0) s->ctrl[r] = (uint8_t)cs;
-        s->siege[r] = (uint8_t)(j_int(e, "siege", 0) != 0);
+        { const J *sg = j_get(e, "siege"); s->siege[r] = (uint8_t)(sg && (sg->type == J_STR || ((sg->type == J_NUM || sg->type == J_BOOL) && sg->num != 0))); }   /* the reference names the besieged side; true is accepted too */
         const J *us = j_get(e, "units");
         for (const J *u = us ? us->child : NULL; u; u = u->next) {
             int nat = nation_of(j_str(u, "nation")), cnt = j_int(u, "n", 1); const char *k = j_str(u, "unit");
