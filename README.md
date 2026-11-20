@@ -111,7 +111,8 @@ Average branching drops from about 89 to 30 moves per decision.
 * Companions separate as singles or all together (`wotr_prune = 0`: any group).
 * The cheapest sufficient action die pays for an action.
 * Auto-resolved minor choices: Mighty Attack / Anduril, Elite-over-Regular for card recruits, Stormcrow's casualty,
-  the cards paid to discard A Power too Great.
+  the cards paid to discard A Power too Great, a new Guide during the turn (the strongest Companion; in the Fellowship
+  phase the Guide is the player's answer).
 * Army moves that would overfill a region (more than ten units) are not offered. Recruiting may overfill one; the
   owner then removes the excess when the action ends (RB p. 26-27).
 
