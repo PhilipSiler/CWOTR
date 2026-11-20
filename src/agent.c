@@ -152,14 +152,20 @@ static _Thread_local int g_imagined;
    the nudges are then two separate steps. (At share 0 with the nudges gone too, Shadow lost 4 games in 10 to raids
    on its strongholds.) */
 static float nudge_share(float al) { static float x = -2; if (x < -1) { const char *v = getenv("WOTR_NUDGE"); x = v ? (float)atof(v) : -1; } return x >= 0 ? x : al; }
-/* what an own city or stronghold that a Free Peoples army could reach in two marches is worth guarding (0: not one, or not threatened) */
-static float home_cost(const State *s, int r) {
-    int t = REGION[r].settle, vp = t == S_STRONGHOLD ? 2 : t == S_CITY ? 1 : 0;
+/* what an own city or stronghold with a Free Peoples army beside it is worth guarding, when `left` Shadow units would
+   stand in it (0: not one, not threatened, or held well enough). Held well enough: at least one unit - or, with
+   WOTR_HOME_THIN=1 (2026-11-20), at least as many units as the largest such Free Peoples army, five at most (what fits
+   inside the walls). Against the raiding Free Peoples of run slow2, Orthanc was lost with one regular in it and four
+   Rohan units next door, Moria with three against four Elves. */
+static float home_cost(const State *s, int r, int left) {
+    int t = REGION[r].settle, vp = t == S_STRONGHOLD ? 2 : t == S_CITY ? 1 : 0, threat = 0;
     if (!vp || orig_side(r) != SH || s->ctrl[r] != SH || s->siege[r]) return 0;
-    static int reach = -1; if (reach < 0) { const char *v = getenv("WOTR_HOME_REACH"); reach = v ? atoi(v) : 1; }      /* how near the Free Peoples army must be (regions) */
+    static int reach = -1, thin = -1;
+    if (reach < 0) { const char *v = getenv("WOTR_HOME_REACH"); reach = v ? atoi(v) : 1; v = getenv("WOTR_HOME_THIN"); thin = v ? atoi(v) : 0; }      /* reach: how near the Free Peoples army must be (regions) */
     for (int q = 0; q < NREG; q++)
-        if (DIST[r][q] <= reach && units(s, FP, q) && !(s->siege[q] && s->ctrl[q] == FP)) return wotr_vp(s, FP) + vp >= 4 ? 10.0f : 2.0f * (float)vp;
-    return 0;
+        if (DIST[r][q] <= reach && !(s->siege[q] && s->ctrl[q] == FP)) { int u = units(s, FP, q); if (u > threat) threat = u; }
+    if (!threat || left >= (thin ? (threat < 5 ? threat : 5) : 1)) return 0;
+    return wotr_vp(s, FP) + vp >= 4 ? 10.0f : 2.0f * (float)vp;
 }
 static float lane_guard(const State *s, Move m, int n) {
     static int on = -1;
@@ -248,9 +254,15 @@ static float lane_guard(const State *s, Move m, int n) {
     if ((s->dkind == D_ACTION || s->dkind == D_ARMY_MOVE2) && (m.type == M_ARMY || m.type == M_MUSTER || m.type == M_MUSTER_ELITE)) {
         static float w = -1; if (w < 0) { const char *v = getenv("WOTR_HOME"); w = v ? (float)atof(v) : 1.0f; }
         float z = 0; int dst = m.type == M_ARMY ? m.b : m.a;
-        if (w > 0 && m.type == M_ARMY && units(s, SH, m.a) == m.c + m.d) z += w * home_cost(s, m.a);
-        if (w > 0 && !units(s, SH, dst)) z -= w * home_cost(s, dst);
+        if (w > 0 && m.type == M_ARMY) z += w * home_cost(s, m.a, units(s, SH, m.a) - m.c - m.d);
+        if (w > 0) z -= w * home_cost(s, dst, units(s, SH, dst));
         if (z != 0) return z;
+    }
+    /* ... and do not advance out of one after a battle, leaving it short (only the units held back from the attack stay) */
+    if (s->dkind == D_ADVANCE && m.a == 1 && s->b.src != s->b.dst) {
+        static float w = -1; if (w < 0) { const char *v = getenv("WOTR_HOME"); w = v ? (float)atof(v) : 1.0f; }
+        int rear = 0; for (int i = NFPNAT; i < NNAT; i++) rear += s->b.rear_reg[i] + s->b.rear_eli[i];
+        return w * home_cost(s, s->b.src, rear);
     }
     if (s->dkind != D_ACTION) return 0;
     if (m.type == M_SKIP && n > 1) return 0.3f;
