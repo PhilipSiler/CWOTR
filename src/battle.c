@@ -422,8 +422,8 @@ void fr_round(State *s, Frame *f) {
         if (has_cc(s, SH, CC_THEY_ARE_TERRIBLE) && nl >= 1) { b->forfeit[SH] += 1; srmod++; }
         int fthr = base_threshold(s, FP), sthr = base_threshold(s, SH);
         int fmiss = 0, smiss = 0, sones = 0;
-        int fh = roll_hits(s, fd, fthr, fmod, 0, &fmiss);
-        int sh = roll_hits(s, sd, sthr, smod, &sones, &smiss);
+        wotr_rk_d6 = 7; int fh = roll_hits(s, fd, fthr, fmod, 0, &fmiss);
+        wotr_rk_d6 = 8; int sh = roll_hits(s, sd, sthr, smod, &sones, &smiss);
         if (has_cc(s, FP, CC_CONFUSION)) { fh += sones; smiss -= sones; }
         /* leader re-rolls */
         int slead = army_leadership(s, SH, sr) - (b->white_rider ? nazgul_leadership(s, sr) : b->forfeit[SH]);
@@ -449,9 +449,9 @@ void fr_round(State *s, Frame *f) {
             }
             if (flead < 0) flead = 0;
         }
-        int frr = roll_hits(s, flead < fmiss ? (flead > 5 ? 5 : flead) : (fmiss > 5 ? 5 : fmiss), fthr, frmod, 0, 0);
-        int srr = roll_hits(s, slead < smiss ? (slead > 5 ? 5 : slead) : (smiss > 5 ? 5 : smiss), sthr, srmod, 0, 0);
-        b->reroll_hits[FP] = (uint8_t)frr; b->reroll_hits[SH] = (uint8_t)srr;
+        wotr_rk_d6 = 9; int frr = roll_hits(s, flead < fmiss ? (flead > 5 ? 5 : flead) : (fmiss > 5 ? 5 : fmiss), fthr, frmod, 0, 0);
+        wotr_rk_d6 = 10; int srr = roll_hits(s, slead < smiss ? (slead > 5 ? 5 : slead) : (smiss > 5 ? 5 : smiss), sthr, srmod, 0, 0);
+        wotr_rk_d6 = 0; b->reroll_hits[FP] = (uint8_t)frr; b->reroll_hits[SH] = (uint8_t)srr;
         /* initiative 5, the defender's card first: No Quarter / Nameless Wood with a hit in the roll or re-roll, and
            Mumakil with more hits scored this round than the opponent (pre-combat hits included) */
         int fsc = b->pre_fp_hits + fh + frr, ssc = b->pre_sh_hits + sh + srr, fadd = 0, sadd = 0;

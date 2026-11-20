@@ -13,6 +13,7 @@
 *.o
 /proto/bridge
 /proto/bridge_check
+/proto/hambot
 
 # --- training output: keep only the scripts and the one-line-per-result log
 /runs/*

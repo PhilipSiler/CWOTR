@@ -240,3 +240,10 @@ int wotr_mid_turn(State *s, int side, uint64_t seed, char *err, int en) {
     return wotr_check(s, err, en);
 }
 #undef NO
+
+/* An outside source for random draws (a referee's dice, tiles and draws, for a client following its game: proto/hambot.c);
+   unset, the engine's own generator. The kind of draw: 1/2 Free Peoples / Shadow action die, 3 Hunt tile, 4 card
+   (wotr_draw_deck), 5 card from the hand, 6 Companion, 7/8 Free Peoples / Shadow combat die, 9/10 their re-rolls,
+   0 any other die. */
+uint32_t (*wotr_rnd_hook)(struct State *s, uint32_t n, int kind);
+int wotr_rk_d6, wotr_draw_deck;

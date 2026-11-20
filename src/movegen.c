@@ -226,9 +226,13 @@ int gen_comp_moves(const State *s, Move *out) {
         int all = comps_at(s, from) & ~s->comp_moved;
         seen |= comps_at(s, from);
         if (!all) continue;
-        int groups[NCOMP + 1], ng = 0;
-        for (int k = 0; k < NCOMP; k++) if ((all >> k) & 1) groups[ng++] = 1 << k;
-        if (ng > 1) groups[ng++] = all;
+        int groups[128], ng = 0;
+        if (!wotr_prune) {          /* any group of the Companions there (following a player) */
+            for (int g = 1; g < 128; g++) if (!(g & ~all)) groups[ng++] = g;
+        } else {
+            for (int k = 0; k < NCOMP; k++) if ((all >> k) & 1) groups[ng++] = 1 << k;
+            if (ng > 1) groups[ng++] = all;
+        }
         for (int g = 0; g < ng; g++) {
             comp_reach(s, from, comp_range(s, groups[g]), 0, reach);
             int nd = comp_dests(s, groups[g], reach, from, dst);
@@ -417,11 +421,16 @@ int gen_action(const State *s, Move *out) {
     else for (int f = 0; f < NFACE; f++) if (d[f]) { m = z; m.type = M_SKIP; m.die = (uint8_t)f; out[n++] = m; }
     /* elven rings */
     if (s->rings[side] && !s->ring_used[side]) {
-        static const uint8_t to[] = {F_CHAR, F_MA, F_EVENT, F_SPECIAL};
+        /* any result of the side's own dice, but never Will of the West (RB p. 21); the plain Army and Muster results
+           (dominated by Army/Muster) and a Will of the West die as the one changed only when following a player */
+        static const uint8_t to_pruned[] = {F_CHAR, F_MA, F_EVENT, F_SPECIAL};
+        static const uint8_t to_all[] = {F_CHAR, F_MA, F_EVENT, F_SPECIAL, F_ARMY, F_MUSTER};
+        const uint8_t *to = wotr_prune ? to_pruned : to_all; int nto = wotr_prune ? 4 : 6;
         for (int f = 0; f < NFACE; f++) {
-            if (!d[f] || f == F_SPECIAL) continue;
+            if (!d[f] || (f == F_SPECIAL && (wotr_prune || side == SH))) continue;
             if (wotr_prune && f != pany) continue;                 /* spend the least useful die... */
-            for (int t = 0; t < 4; t++) {
+            for (int t = 0; t < nto; t++) {
+                if (to[t] == F_ARMY && side == FP) continue;       /* no plain Army result on a Free Peoples die */
                 if (to[t] == f || (to[t] == F_SPECIAL && side == FP)) continue;
                 if (wotr_prune) {                                  /* ...and only to gain an action that no die offers */
                     if (to[t] == F_SPECIAL) continue;

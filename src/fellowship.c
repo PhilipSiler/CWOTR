@@ -14,7 +14,7 @@ int draw_tile(State *s) {
         for (int t = 0; t < NSTD_TILE; t++) { s->tile_pool[t] += s->tile_out[t]; s->tile_out[t] = 0; tot += s->tile_pool[t]; }
         if (!tot) return -1;
     }
-    int k = (int)rnd(s, (uint32_t)tot);
+    int k = (int)rndk(s, (uint32_t)tot, 3);
     for (int t = 0; t < NTILE; t++) {
         if (k < s->tile_pool[t]) { s->tile_pool[t]--; if (t < NSTD_TILE) s->tile_out[t]++; s->stat_tiles++; return t; }
         k -= s->tile_pool[t];
@@ -228,7 +228,7 @@ void fr_hunt(State *s, Frame *f) {
         } else {
             int c = s->guide, lvl;
             if (s->mv.a == 5) {
-                int m = fsp_comps(s), k = (int)rnd(s, (uint32_t)__builtin_popcount((unsigned)m));
+                int m = fsp_comps(s), k = (int)rndk(s, (uint32_t)__builtin_popcount((unsigned)m), 6);
                 for (c = 0; c < NCOMP; c++) if ((m >> c) & 1 && k-- == 0) break;
             }
             lvl = comp_level(s, c);
@@ -248,7 +248,7 @@ void fr_hunt(State *s, Frame *f) {
                     if (s->mv.a == Q_HAND) {
                         int cand[24], n = 0;
                         for (int k = 0; k < 24; k++) if (s->card_where[k] == W_HAND) cand[n++] = k;
-                        if (n) discard_card(s, cand[rnd(s, (uint32_t)n)]);
+                        if (n) discard_card(s, cand[rndk(s, (uint32_t)n, 5)]);
                     } else if (s->mv.a < 24) discard_card(s, s->mv.a);
                 }
             }
