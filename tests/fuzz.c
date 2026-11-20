@@ -20,6 +20,8 @@ static double weight(const State *s, Move m) {
     case M_DONE: return 4;
     case M_CHOICE:
         if (s->dkind == D_FSP_DECLARE && m.a == 255) return 15;
+        if (s->dkind == D_FSP_DECLARE && m.a == FSP_MORDOR) return 8;
+        if (s->dkind == D_FSP_DECLARE && m.a >= FSP_GUIDE) return 1;
         if (s->dkind == D_FSP_DECLARE || s->dkind == D_REVEAL_DEST) {   /* head for Mordor */
             int d = DIST[m.a][R_MORANNON] < DIST[m.a][R_MINAS_MORGUL] ? DIST[m.a][R_MORANNON] : DIST[m.a][R_MINAS_MORGUL];
             int d0 = DIST[s->fsp_loc][R_MORANNON] < DIST[s->fsp_loc][R_MINAS_MORGUL] ? DIST[s->fsp_loc][R_MORANNON] : DIST[s->fsp_loc][R_MINAS_MORGUL];

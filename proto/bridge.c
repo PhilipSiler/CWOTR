@@ -666,7 +666,8 @@ static void action_head(Leaf *L, const State *s, Move m, int die) {
     case M_SKIP: step(L, K_ACTION, "\"kind\":\"skip_die\",\"die\":%d,\"face\":\"%s\"}", die, face_key(side, f)); break;
     case M_RING: step(L, K_ACTION, "\"kind\":\"elven_ring\",\"die\":%d,\"from\":\"%s\",\"to\":\"%s\"}", die, face_key(side, m.a), face_key(side, m.b)); break;
     case M_FSP_MOVE: step(L, K_ACTION, "%s\"move_fellowship\"}", head); break;
-    case M_FSP_HIDE: step(L, K_ACTION, "%s\"%s\"}", head, f == F_CHAR || f == F_SPECIAL ? "hide_fellowship" : "hide_fellowship_strider"); break;
+    /* with Strider as Guide the BehindMedia referee offers only his way (any die, a Character die too) */
+    case M_FSP_HIDE: step(L, K_ACTION, "%s\"%s\"}", head, s->guide != C_STRIDER && (f == F_CHAR || f == F_SPECIAL) ? "hide_fellowship" : "hide_fellowship_strider"); break;
     case M_SEPARATE: step(L, K_ACTION, "%s\"separate_companions\"}", head); break;
     case M_COMPS: step(L, K_ACTION, "%s\"move_companions\"}", head); break;
     case M_ARMY: step(L, K_ACTION, "%s\"%s\"}", head, m.f ? "move_armies" : "move_army_with_leader"); break;
@@ -717,6 +718,74 @@ static Leaf *leaf_new(Leaf *L, int *n, Move m) {
     Leaf *l = &L[(*n)++];
     l->nmv = 1; l->mv[0] = m; l->nstep = 0; l->die = -1;
     return l;
+}
+/* The questions added to ask what the official texts leave to a player (State.qtag), written as the BehindMedia referee writes
+ * a card's question: "answer" plus its typed field (a character), a Leader as "LEADER:<nation>", "skip". */
+static void qtag_step(Leaf *L, const State *s, int a) {
+    int side = s->qtag == Q_WORDS_OF_POWER || s->qtag == Q_BLACK_BREATH ? SH : FP;
+    if (s->qtag == Q_NAZGUL_STRIKE || s->qtag == Q_BCC_NAZGUL || s->qtag == Q_BCC_ARMY || s->qtag == Q_BCC_ATTACK || s->qtag == Q_FLOCKS || s->qtag == Q_BALROG || s->qtag == Q_DRAW_DECK) side = SH;
+    if (s->qtag == Q_DRAW_DECK) { step(L, K_CARD_CHOICE, "\"kind\":\"draw\",\"deck\":\"%s\"}", a ? "strategy" : "character"); return; }
+    if (s->qtag == Q_WHITE_RIDER) { step(L, K_WHITE_RIDER, "\"kind\":\"%s\"}", a == 1 ? "use" : "skip"); return; }
+    if (s->qtag == Q_FLOCKS || s->qtag == Q_BALROG) {      /* "Discard ...?": the BehindMedia referee's "yes" / "skip" */
+        step(L, K_CARD_CHOICE, "\"kind\":\"card_choice\",\"card\":\"%s\",\"answer\":\"%s\"%s}", CARD_KEY[s->qtag == Q_FLOCKS ? CARD_FLOCKS_OF_CREBAIN : CARD_BALROG_OF_MORIA],
+             a == 1 ? "yes" : "skip", a == 1 ? "" : ",\"skip\":true");
+        return;
+    }
+    if (s->qtag == Q_BCC_ATTACK) {        /* The Black Captain Commands' attack: the BehindMedia referee's Choose attack */
+        int from = s->minion_loc[M_WK] < NREG ? s->minion_loc[M_WK] : 0;
+        if (card_asking(s) == CARD_THE_RINGWRAITHS_ARE_ABROAD && a < NREG)      /* an Army with a Nazgul next to the target */
+            for (int r = 0; r < NREG; r++) if (s->naz[r] && units(s, SH, r) && (r == a || DIST[r][a] == 1)) { from = r; break; }
+        step(L, K_CHOOSE_ATTACK, "\"kind\":\"attack\",\"from\":\"%s\",\"to\":\"%s\",\"all\":true}", REGION_KEY[from], REGION_KEY[a < NREG ? a : 0]);
+        return;
+    }
+    if (s->qtag == Q_EXCESS) {      /* the BehindMedia referee's Remove excess unit */
+        step(L, K_REMOVE_EXCESS_UNIT, "\"kind\":\"remove_unit\",\"nation\":\"%s\",\"unit\":\"%s\",\"region\":\"%s\"}", NATION_KEY[a & 7], a >= 8 ? "elite" : "regular", REGION_KEY[s->qreg]);
+        return;
+    }
+    if (s->qtag == Q_LURE) {
+        step(L, K_CARD_CHOICE, "\"kind\":\"card_choice\",\"card\":\"%s\",\"answer\":\"%s\"}", CARD_KEY[CARD_LURE_OF_THE_RING], a ? "eliminate" : "corruption");
+        return;
+    }
+    if (s->qtag == Q_BCC_NAZGUL || s->qtag == Q_BCC_ARMY) {
+        static const char *const first[2] = { "recruit", "move" }, *const then[3] = { "skip", "move", "attack" };
+        const char *ans = a == 255 ? "skip" : s->qtag == Q_BCC_NAZGUL ? first[a & 1] : then[a < 3 ? a : 0];
+        int ck = s->qtag == Q_BCC_ARMY && card_asking(s) == CARD_THE_RINGWRAITHS_ARE_ABROAD ? CARD_THE_RINGWRAITHS_ARE_ABROAD : CARD_THE_BLACK_CAPTAIN_COMMANDS;
+        step(L, K_CARD_CHOICE, "\"kind\":\"card_choice\",\"card\":\"%s\",\"answer\":\"%s\"%s}", CARD_KEY[ck], ans, !strcmp(ans, "skip") ? ",\"skip\":true" : "");
+        return;
+    }
+    int c = s->qtag == Q_WORN_WITH_SORROW ? CARD_WORN_WITH_SORROW_AND_TOIL : s->qtag == Q_NAZGUL_STRIKE ? CARD_THE_NAZGUL_STRIKE : s->b.card[side];
+    const char *ck = c < NCARD ? CARD_KEY[c] : "";
+    if (a == 255) step(L, K_CARD_CHOICE, "\"kind\":\"card_choice\",\"card\":\"%s\",\"answer\":\"skip\",\"skip\":true}", ck);
+    else if (s->qtag == Q_NAZGUL_STRIKE && a == Q_HUNT) step(L, K_CARD_CHOICE, "\"kind\":\"card_choice\",\"card\":\"%s\",\"answer\":\"hunt\"}", ck);
+    else if ((s->qtag == Q_WORN_WITH_SORROW || s->qtag == Q_NAZGUL_STRIKE) && a < NCARD) step(L, K_CARD_CHOICE, "\"kind\":\"card_choice\",\"card\":\"%s\",\"answer\":\"%s\",\"target_card\":\"%s\"}", ck, CARD_KEY[a], CARD_KEY[a]);
+    else if (s->qtag == Q_WORN_WITH_SORROW && a == Q_HAND) step(L, K_CARD_CHOICE, "\"kind\":\"card_choice\",\"card\":\"%s\",\"answer\":\"hand\"}", ck);
+    else if (s->qtag == Q_WORN_WITH_SORROW) step(L, K_CARD_CHOICE, "\"kind\":\"card_choice\",\"card\":\"%s\",\"answer\":\"%s\",\"target_card\":\"%s\"}", ck, CARD_KEY[a], CARD_KEY[a]);
+    else if (a >= Q_LEADER && a < Q_LEADER + NFPNAT) step(L, K_CARD_CHOICE, "\"kind\":\"card_choice\",\"card\":\"%s\",\"answer\":\"LEADER:%s\"}", ck, NATION_KEY[a - Q_LEADER]);
+    else if (a == Q_NAZGUL) step(L, K_CARD_CHOICE, "\"kind\":\"card_choice\",\"card\":\"%s\",\"answer\":\"nazgul\"}", ck);
+    else if (a >= Q_MINION && a < Q_MINION + NMINION) step(L, K_CARD_CHOICE, "\"kind\":\"card_choice\",\"card\":\"%s\",\"answer\":\"%s\",\"character\":\"%s\"}", ck, minion_key(a - Q_MINION), minion_key(a - Q_MINION));
+    else if (a < NCOMP) step(L, K_CARD_CHOICE, "\"kind\":\"card_choice\",\"card\":\"%s\",\"answer\":\"%s\",\"character\":\"%s\"}", ck, comp_key(s, a), comp_key(s, a));
+    else step(L, K_CARD_CHOICE, "\"kind\":\"card_choice\",\"card\":\"%s\",\"answer\":\"%d\"}", ck, a);
+}
+/* A card's separation as the BehindMedia referee asks it: the Companions one at a time, then where to (a leaf per destination
+   when the engine asks it next; with one way only, or on the Mordor Track where the Companions are removed, that one).
+   l holds the steps so far; returns the new leaf count. */
+static int separation_leaves(Leaf *L, int nl, Leaf *l, const State *s, Move m, int a) {
+    for (int k = 0; k < NCOMP; k++) if ((a >> k) & 1) step(l, K_SEPARATE_COMPANIONS, "\"kind\":\"separate\",\"character\":\"%s\"}", CHAR_KEY[k]);
+    State t = *s; wotr_apply(&t, m);
+    if (!t.winner && t.dkind == D_SEP_DEST && t.dplayer == FP && t.nopt) {
+        Leaf base = *l;
+        for (int d = 0; d < t.nopt; d++) {
+            Leaf *lx = d == 0 ? l : leaf_new(L, &nl, m);
+            if (!lx) break;
+            if (d) *lx = base;
+            step(lx, K_SEPARATE_COMPANIONS, "\"kind\":\"separate_to\",\"to\":\"%s\"}", REGION_KEY[t.opt[d]]);
+            lx->nmv = 2; memset(&lx->mv[1], 0, sizeof(Move)); lx->mv[1].type = M_CHOICE; lx->mv[1].a = t.opt[d];
+        }
+    } else if (a) {
+        int c0 = __builtin_ctz((unsigned)a), to = t.comp_loc[c0] < NREG ? t.comp_loc[c0] : s->fsp_loc;
+        step(l, K_SEPARATE_COMPANIONS, "\"kind\":\"separate_to\",\"to\":\"%s\"}", REGION_KEY[to]);
+    }
+    return nl;
 }
 /* Every legal move at the current question, as lists of small answers. */
 static int build_leaves(const Ref *R, Leaf *L) {
@@ -790,7 +859,12 @@ static int build_leaves(const Ref *R, Leaf *L) {
             }
             break;
         case D_DISCARD: step(l, K_DISCARD_EXCESS_CARD, "\"kind\":\"discard\",\"card\":\"%s\"}", CARD_KEY[a]); break;
-        case D_FSP_DECLARE: if (a == 255) step(l, K_FELLOWSHIP_PHASE, "\"kind\":\"done\"}"); else step(l, K_FELLOWSHIP_PHASE, "\"kind\":\"declare\",\"region\":\"%s\"}", REGION_KEY[a]); break;
+        case D_FSP_DECLARE:         /* the phase's one question (fr_fsp_phase): done, declare, a Guide (200 + c), enter Mordor (199) */
+            if (a == 255) step(l, K_FELLOWSHIP_PHASE, "\"kind\":\"done\"}");
+            else if (a >= 200 && a < 200 + NCOMP) step(l, K_FELLOWSHIP_PHASE, "\"kind\":\"guide\",\"character\":\"%s\"}", comp_key(s, a - 200));
+            else if (a == 199) step(l, K_FELLOWSHIP_PHASE, "\"kind\":\"enter_mordor\"}");
+            else step(l, K_FELLOWSHIP_PHASE, "\"kind\":\"declare\",\"region\":\"%s\"}", REGION_KEY[a]);
+            break;
         case D_GUIDE:               /* in the Fellowship phase keeping the present Guide is "done", as the protocol's menu has it */
             if (s->st[s->sp - 1].kind == FR_FSP_PHASE && a == s->guide) step(l, K_FELLOWSHIP_PHASE, "\"kind\":\"done\"}");
             else step(l, s->st[s->sp - 1].kind == FR_FSP_PHASE ? K_FELLOWSHIP_PHASE : K_CHOOSE_GUIDE, "\"kind\":\"guide\",\"character\":\"%s\"}", CHAR_KEY[a]);
@@ -820,12 +894,41 @@ static int build_leaves(const Ref *R, Leaf *L) {
             step(l, K_CARD_CHOICE, "\"kind\":\"card_choice\",\"card\":\"%s\",\"answer\":\"%d\",\"count\":%d}", s->b.card[SH] < NCARD ? CARD_KEY[s->b.card[SH]] : "", a, a);
             break;
         default: {                  /* a card's own question */
+            if (s->qtag) { qtag_step(l, s, a); break; }
             int c = card_asking(s);
             const char *ck = c >= 0 && c < NCARD ? CARD_KEY[c] : "";
             if (a == 255) step(l, K_CARD_CHOICE, "\"kind\":\"card_choice\",\"card\":\"%s\",\"answer\":\"skip\",\"skip\":true}", ck);
+            /* There is Another Way with Gollum as Guide: the BehindMedia referee's "hide" / "move" / "skip" */
+            else if (c == CARD_THERE_IS_ANOTHER_WAY && s->dkind == D_CARD_OPTION && a <= 2)
+                step(l, K_CARD_CHOICE, "\"kind\":\"card_choice\",\"card\":\"%s\",\"answer\":\"%s\"%s}", ck, a == 1 ? "hide" : a == 2 ? "move" : "skip", a ? "" : ",\"skip\":true");
             else if ((s->dkind == D_CARD_REGION || s->dkind == D_CARD_ARMY) && a < NREG) step(l, K_CARD_CHOICE, "\"kind\":\"card_choice\",\"card\":\"%s\",\"answer\":\"%s\",\"region\":\"%s\"}", ck, REGION_KEY[a], REGION_KEY[a]);
             else if (s->dkind == D_CARD_NATION && a < NNAT) step(l, K_CARD_CHOICE, "\"kind\":\"card_choice\",\"card\":\"%s\",\"answer\":\"%s\",\"nation\":\"%s\"}", ck, NATION_KEY[a], NATION_KEY[a]);
             else if (s->dkind == D_CARD_CARD && a < NCARD) step(l, K_CARD_CHOICE, "\"kind\":\"card_choice\",\"card\":\"%s\",\"answer\":\"%s\",\"target_card\":\"%s\"}", ck, CARD_KEY[a], CARD_KEY[a]);
+            /* Gwaihir the Windlord, We Prove the Swifter: the BehindMedia referee's "move_companion" (a Companion, from, to: one answer),
+               or "separate" and then the separation */
+            else if (s->dkind == D_CARD_COMP && (c == CARD_GWAIHIR_THE_WINDLORD || c == CARD_WE_PROVE_THE_SWIFTER) && (a & 0x80)) {
+                int k0 = __builtin_ctz((unsigned)(a & 0x7F)), from = s->comp_loc[k0];
+                State t = *s; wotr_apply(&t, m);
+                int made = 0;
+                if (!t.winner && t.dkind == D_CARD_REGION && t.dplayer == FP)
+                    for (int d = 0; d < t.nopt; d++) {
+                        if (t.opt[d] == 255) continue;
+                        Leaf *lx = made ? leaf_new(L, &nl, m) : l;
+                        if (!lx) break;
+                        step(lx, K_CARD_CHOICE, "\"kind\":\"move_companion\",\"character\":\"%s\",\"from\":\"%s\",\"to\":\"%s\"}", CHAR_KEY[k0], REGION_KEY[from < NREG ? from : 0], REGION_KEY[t.opt[d]]);
+                        lx->nmv = 2; memset(&lx->mv[1], 0, sizeof(Move)); lx->mv[1].type = M_CHOICE; lx->mv[1].a = t.opt[d];
+                        made = 1;
+                    }
+                if (!made) step(l, K_CARD_CHOICE, "\"kind\":\"move_companion\",\"character\":\"%s\",\"from\":\"%s\",\"to\":\"%s\"}", CHAR_KEY[k0], REGION_KEY[from < NREG ? from : 0], REGION_KEY[from < NREG ? from : 0]);
+            }
+            else if (s->dkind == D_CARD_COMP && (c == CARD_GWAIHIR_THE_WINDLORD || c == CARD_WE_PROVE_THE_SWIFTER) && a < 0x80) {
+                step(l, K_CARD_CHOICE, "\"kind\":\"card_choice\",\"card\":\"%s\",\"answer\":\"separate\"}", ck);
+                nl = separation_leaves(L, nl, l, s, m, a);
+            }
+            /* I Will Go Alone, There and Back Again: the BehindMedia referee's separation, the Companions one at a time, then where to */
+            else if (s->dkind == D_CARD_COMP && (c == CARD_I_WILL_GO_ALONE || c == CARD_THERE_AND_BACK_AGAIN) && a < 0x80) {
+                nl = separation_leaves(L, nl, l, s, m, a);
+            }
             else if (s->dkind == D_CARD_COMP && __builtin_popcount((unsigned)(a & 0x7F)) == 1) step(l, K_CARD_CHOICE, "\"kind\":\"card_choice\",\"card\":\"%s\",\"answer\":\"%s\",\"character\":\"%s\"}", ck, CHAR_KEY[__builtin_ctz((unsigned)a)], CHAR_KEY[__builtin_ctz((unsigned)a)]);
             else step(l, K_CARD_CHOICE, "\"kind\":\"card_choice\",\"card\":\"%s\",\"answer\":\"%d\",\"count\":%d}", ck, a, a);
             break; }
@@ -2222,6 +2325,7 @@ static int cmd_bot(int argc, char **argv) {
 }
 
 int main(int argc, char **argv) {
+    wotr_turn_cap = 200;            /* the referee ends a game at its own limit, not ours */
     wotr_global_init();
     feat_init();
     names_init();

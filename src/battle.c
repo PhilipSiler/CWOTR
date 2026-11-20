@@ -34,6 +34,11 @@ void fr_casualty(State *s, Frame *f) {
             if (s->eli[r][n]) s->opt[s->nopt++] = (uint8_t)(8 + n);                     /* reduce an elite */
             if (s->eli[r][n] && f->v[2] >= 2) s->opt[s->nopt++] = (uint8_t)(16 + n);    /* remove an elite (2 hits) */
         }
+        {   /* hits enough to destroy the whole Army: no choice to make, everything goes (RB p. 30) */
+            int cap = 0;
+            for (int n = lo; n < hi; n++) cap += s->reg[r][n] + 2 * s->eli[r][n];
+            if (f->v[2] >= cap) for (int i = 0; i < s->nopt; i++) if ((s->opt[i] >> 3) != 1) { s->opt[0] = s->opt[i]; s->nopt = 1; break; }
+        }
         if (s->nopt > 1) ASK(D_CASUALTY, f->v[0]); else s->mv.a = s->opt[0];
         {
             int r2 = f->v[1], n = s->mv.a & 7, k = s->mv.a >> 3;
@@ -71,7 +76,8 @@ int cc_playable(const State *s, int side, int c) {
     switch (CARD[c].combat) {
     case CC_IT_IS_A_GIFT: case CC_ONE_FOR_THE_DARK_LORD: return s->mordor < 0 && s->fsp_loc == d;
     case CC_BLADE_OF_WESTERNESSE: return (comps & ((1 << C_MERRY) | (1 << C_PIPPIN))) != 0;
-    case CC_MIGHTY_ATTACK: case CC_DARING_DEFIANCE: case CC_BRAVE_STAND: return comps != 0;
+    case CC_DARING_DEFIANCE: return comps != 0 && !b->white_rider;     /* The White Rider: it changes nothing (Card Almanac p. 38) */
+    case CC_MIGHTY_ATTACK: case CC_BRAVE_STAND: return comps != 0;
     case CC_SERVANT_OF_THE_SECRET_FIRE: return (comps & 1) != 0;
     case CC_ANDURIL: return (comps & (1 << C_STRIDER)) != 0;
     case CC_HEROIC_DEATH: case CC_FATEFUL_STRIKE: case CC_SUDDEN_STRIKE: return comps != 0 || fp_leaders(s, fr) > 0;
@@ -83,7 +89,8 @@ int cc_playable(const State *s, int side, int c) {
     case CC_THEY_ARE_TERRIBLE: case CC_DREAD_AND_DESPAIR: case CC_FOUL_STENCH: return naz_lead_now(s) >= 1;
     case CC_BLACK_BREATH: case CC_WORDS_OF_POWER: return s->naz[sr] > 0 || s->minion_loc[M_WK] == sr;
     case CC_DURINS_BANE: return DIST[d][R_MORIA] <= 2;
-    case CC_DEVILRY_OF_ORTHANC: return s->reg[sr][ISENGARD] + s->eli[sr][ISENGARD] > 0 && REGION[d].settle == S_STRONGHOLD;
+    /* "the defending Army is in a Stronghold": inside it, a siege battle (Card Almanac) */
+    case CC_DEVILRY_OF_ORTHANC: return s->reg[sr][ISENGARD] + s->eli[sr][ISENGARD] > 0 && REGION[d].settle == S_STRONGHOLD && b->siege;
     case CC_MUMAKIL: return s->eli[sr][SOUTHRON] > 0;
     case CC_WE_COME_TO_KILL: return elites(s, SH, sr) > 0;
     default: return 1;
@@ -122,7 +129,7 @@ void push_battle(State *s, int side, int src, int dst, int nr, int ne) {
     s->stat_battles++;
     /* The White Rider */
     int fr = side == FP ? src : dst, sr = side == FP ? dst : src;
-    if (s->gandalf_white && s->comp_loc[C_GANDALF] == fr && nazgul_leadership(s, sr) > 0) b->white_rider = 1;
+    if (s->gandalf_white && s->comp_loc[C_GANDALF] == fr && nazgul_leadership(s, sr) > 0) b->white_rider = 2;     /* asked first (fr_battle) */
     push(s, FR_BATTLE);
 }
 
@@ -131,6 +138,16 @@ static void restore_rearguard(State *s) {
     for (int n = 0; n < NNAT; n++) { s->reg[b->src][n] += b->rear_reg[n]; s->eli[b->src][n] += b->rear_eli[n]; b->rear_reg[n] = b->rear_eli[n] = 0; }
 }
 static int rear_units(const State *s) { int k = 0; for (int n = 0; n < NNAT; n++) k += s->b.rear_reg[n] + s->b.rear_eli[n]; return k; }
+
+/* The Witch-king's "Sorcerer": a Shadow Combat card played in round 1 with him in the battle earns a card of its type,
+ * drawn once that round is fully over and only if he survived it (Card Almanac p. 8, 36-37). */
+static void sorcerer(State *s) {
+    Battle *b = &s->b;
+    if (!b->sorc) return;
+    int deck = b->sorc - 1;
+    b->sorc = 0;
+    if (s->minion_loc[M_WK] < NREG) draw_card(s, deck);
+}
 
 static int retreat_options(State *s, int side, int from) {
     s->nopt = 0;
@@ -172,7 +189,14 @@ void fr_battle(State *s, Frame *f) {
     Battle *b = &s->b;
     int att = b->att, def = 1 - att;
     CO_BEGIN
+    /* The White Rider: "you may" cancel the Nazgul's Leadership (forfeiting Gandalf's): the Free Peoples choose, once,
+       when the battle begins (the BehindMedia referee's question) */
+    if (b->white_rider == 2) {
+        s->nopt = 2; s->opt[0] = 1; s->opt[1] = 255; s->qtag = Q_WHITE_RIDER; ASK(D_CARD_OPTION, FP); s->qtag = Q_NONE;
+        b->white_rider = s->mv.a == 1;
+    }
     for (;;) {
+        if (b->round >= 1) sorcerer(s);                               /* round 1 is over: before the next */
         b->round++;
         /* defender in an own stronghold: field battle or retreat into siege */
         if (!b->siege && !b->sortie && !b->relief && REGION[b->dst].settle == S_STRONGHOLD && s->ctrl[b->dst] == def && !s->siege[b->dst]) {
@@ -214,12 +238,24 @@ void fr_battle(State *s, Frame *f) {
     /* ---- end of battle ---- */
     if (b->ended == 3 || !units(s, att, b->src)) wipe_leaders(s, att, b->src, 1);
     if (b->ended == 4) {                                               /* defender withdrew into the stronghold */
+        sorcerer(s);
         s->nopt = 2; s->opt[0] = 0; s->opt[1] = 1;
         ASK(D_ADVANCE, att);
         if (s->mv.a) {
             advance(s);
             s->siege[b->dst] = 1;
-            enforce_stacking(s, def, b->dst);
+        }
+        /* inside a Stronghold under siege at most 5 units: the owner removes the excess, back to the reinforcements
+           (RB p. 26-27; the BehindMedia referee's Remove excess unit) */
+        while (units(s, def, b->dst) > (s->siege[b->dst] && s->ctrl[b->dst] == def ? 5 : 10)) {
+            int r = b->dst, lo = def == FP ? 0 : NFPNAT, hi = def == FP ? NFPNAT : NNAT;
+            s->nopt = 0;
+            for (int n = lo; n < hi; n++) { if (s->reg[r][n]) s->opt[s->nopt++] = (uint8_t)n; if (s->eli[r][n]) s->opt[s->nopt++] = (uint8_t)(8 + n); }
+            s->qreg = (uint8_t)r; s->qtag = Q_EXCESS;
+            if (s->nopt > 1) ASK(D_CARD_OPTION, def); else s->mv.a = s->opt[0];
+            s->qtag = Q_NONE;
+            { int r2 = b->dst, n = s->mv.a & 7;
+              if (s->mv.a >= 8) { s->eli[r2][n]--; s->pool_eli[n]++; } else { s->reg[r2][n]--; s->pool_reg[n]++; } }
         }
     } else if (b->ended == 2) {
         if (!units(s, def, b->dst)) wipe_leaders(s, def, b->dst, 1);
@@ -232,11 +268,13 @@ void fr_battle(State *s, Frame *f) {
             /* besiegers gone: fix_siege below lifts the siege */
         } else if (units(s, att, b->src) && can_enter_army(s, att, b->src, b->dst) &&
                    units(s, att, b->src) + units(s, att, b->dst) <= 10) {
+            sorcerer(s);
             s->nopt = 2; s->opt[0] = 0; s->opt[1] = 1;
             ASK(D_ADVANCE, att);
             if (s->mv.a) advance(s);
         }
     }
+    sorcerer(s);
     restore_rearguard(s);
     fix_siege(s, b->src); fix_siege(s, b->dst);
     b->active = 0;
@@ -269,7 +307,7 @@ void fr_round(State *s, Frame *f) {
     int att = b->att, def = 1 - att;
     int fr = att == FP ? b->src : b->dst, sr = att == SH ? b->src : b->dst;
     CO_BEGIN
-    b->card[0] = b->card[1] = 255; b->hits[0] = b->hits[1] = 0; b->pre_fp_hits = 0;
+    b->card[0] = b->card[1] = 255; b->hits[0] = b->hits[1] = 0; b->pre_fp_hits = b->pre_sh_hits = 0; b->dd = 0;
     b->forfeit[0] = b->forfeit[1] = 0; b->wop_comp = 255; b->reroll_hits[0] = b->reroll_hits[1] = 0;
     /* 1: combat cards, attacker first */
     for (f->v[0] = 0; f->v[0] < 2; f->v[0]++) {
@@ -286,24 +324,27 @@ void fr_round(State *s, Frame *f) {
             side = f->v[0] == 0 ? att : def;
             if (s->mv.a != 255) {
                 b->card[side] = s->mv.a; discard_card(s, s->mv.a);
-                if (side == SH && b->round == 1 && s->minion_loc[M_WK] == sr) draw_card(s, CARD_DECK(s->mv.a));   /* Sorcerer */
+                if (side == SH && b->round == 1 && s->minion_loc[M_WK] == sr) b->sorc = (uint8_t)(CARD_DECK(s->mv.a) + 1);   /* Sorcerer: drawn after the round */
             }
         }
     }
     /* cancellations (initiative 0; defender's card first) */
     for (int k = 0; k < 2; k++) {
         int side = k == 0 ? def : att;
-        if (side == FP && has_cc(s, FP, CC_DARING_DEFIANCE) && b->card[SH] != 255) {
+        if (side == FP && has_cc(s, FP, CC_DARING_DEFIANCE) && b->card[SH] != 255 && !b->white_rider) {
             for (int c = 0; c < NCOMP; c++) if (s->comp_loc[c] == fr) b->forfeit[FP] += comp_leadership(s, c);
-            b->card[SH] = 255;
+            b->card[SH] = 255; b->dd = 1;
         }
         if (side == SH && has_cc(s, SH, CC_SWARM_OF_BATS) && b->card[FP] != 255) { b->card[FP] = 255; b->card[SH] = 255; }
     }
-    if (has_cc(s, SH, CC_WORDS_OF_POWER)) {
-        int best = -1, m = comps_at(s, fr);
-        static const uint8_t pri[NCOMP] = {C_STRIDER, C_GANDALF, C_BOROMIR, C_GIMLI, C_LEGOLAS, C_MERRY, C_PIPPIN};
-        for (int i = 0; i < NCOMP && best < 0; i++) if ((m >> pri[i]) & 1) best = pri[i];
-        if (best >= 0) { b->wop_comp = (uint8_t)best; b->forfeit[FP] += comp_leadership(s, best); }
+    /* Words of Power (initiative 1): the Shadow chooses the Companion (card text: "Choose a Companion") */
+    if (has_cc(s, SH, CC_WORDS_OF_POWER) && comps_at(s, fr)) {
+        s->nopt = 0;
+        for (int c = 0; c < NCOMP; c++) if ((comps_at(s, fr) >> c) & 1) s->opt[s->nopt++] = (uint8_t)c;
+        s->qtag = Q_WORDS_OF_POWER;
+        ASK(D_CARD_OPTION, SH);
+        s->qtag = Q_NONE;
+        b->wop_comp = s->mv.a; b->forfeit[FP] += (uint8_t)comp_leadership(s, s->mv.a);
     }
     /* Scouts (initiative 1) */
     if (has_cc(s, FP, CC_SCOUTS)) {
@@ -325,6 +366,7 @@ void fr_round(State *s, Frame *f) {
             if (h) CALL(push_casualty(s, SH, sr, h, 0));
         } else if (has_cc(s, SH, CC_DURINS_BANE)) {
             h = roll_hits(s, 3, 4, 0, 0, 0);
+            b->pre_sh_hits = (uint8_t)h;
             if (h) CALL(push_casualty(s, FP, fr, h, 0));
         }
     }
@@ -332,7 +374,7 @@ void fr_round(State *s, Frame *f) {
     /* Relentless Assault (initiative 3) */
     f->v[4] = 0;
     if (has_cc(s, SH, CC_RELENTLESS_ASSAULT)) {
-        int mx = units(s, SH, sr) - 1; if (mx > 2) mx = 2;
+        int mx = 2;         /* "up to two hits against your units" (no other limit: the BehindMedia referee's reading) */
         s->nopt = 0;
         for (int k = 0; k <= mx; k++) s->opt[s->nopt++] = (uint8_t)k;
         if (s->nopt > 1) {
@@ -341,7 +383,13 @@ void fr_round(State *s, Frame *f) {
             if (f->v[4]) CALL(push_casualty(s, SH, sr, f->v[4], 0));
         }
     }
-    {   /* 2+3: combat roll and leader re-roll */
+    f->v[6] = 255;
+    if (has_cc(s, SH, CC_DREAD_AND_DESPAIR) && naz_lead_now(s) >= 1) {
+        s->nopt = 0;
+        for (int k = 1; k <= naz_lead_now(s) && s->nopt < MAXOPT; k++) s->opt[s->nopt++] = (uint8_t)k;
+        ASK(D_SELF_HITS, SH); f->v[6] = s->mv.a;   /* asked even with one answer, as the BehindMedia referee does */
+    }
+    {   /* 2+3: combat roll and leader re-roll; 5: hits after the re-roll */
         int comps = battle_comps(s);
         int caps = CAPTAINS & ~(s->gandalf_white ? 1 << C_GANDALF : 0);   /* Gandalf the White is no Captain of the West */
         int fstr = units(s, FP, fr) + __builtin_popcount((unsigned)(comps & caps)), sstr = units(s, SH, sr);
@@ -357,8 +405,7 @@ void fr_round(State *s, Frame *f) {
         if (has_cc(s, FP, CC_BRAVE_STAND)) sd -= __builtin_popcount((unsigned)comps_at(s, fr));
         if (has_cc(s, SH, CC_ONE_FOR_THE_DARK_LORD)) { smod++; srmod++; }
         if (has_cc(s, SH, CC_CRUEL_AS_DEATH) && nl >= 2) { b->forfeit[SH] += 2; smod++; }
-        if (has_cc(s, SH, CC_THEY_ARE_TERRIBLE) && nl >= 1) { b->forfeit[SH] += 1; srmod++; }
-        if (has_cc(s, SH, CC_DREAD_AND_DESPAIR) && nl >= 1) { int k = fd - 1 < nl ? fd - 1 : nl; if (k < 1) k = 1; b->forfeit[SH] += (uint8_t)k; fd -= k; }
+        if (has_cc(s, SH, CC_DREAD_AND_DESPAIR) && f->v[6] != 255) { int k = f->v[6]; b->forfeit[SH] += (uint8_t)k; fd -= k; if (fd < 1) fd = 1; }
         if (has_cc(s, SH, CC_DEVILRY_OF_ORTHANC) || has_cc(s, SH, CC_MUMAKIL)) smod++;
         if (has_cc(s, SH, CC_DEADLY_STRIFE)) { fmod += 2; smod += 2; frmod += 2; srmod += 2; }
         if (has_cc(s, SH, CC_DESPERATE_BATTLE)) { fmod++; smod++; frmod++; srmod++; }
@@ -367,57 +414,108 @@ void fr_round(State *s, Frame *f) {
         if (b->help_unlooked) sd -= b->help_unlooked;
         if (fd < 1) fd = 1;
         if (sd < 1) sd = 1;
+        /* Foul Stench (initiative 3, before the roll): with the Nazgul Leadership at least the Free Peoples', no Free
+           Peoples re-roll; it negates Mighty Attack, Anduril, Blade of Westernesse and Fateful Strike (Card Almanac p. 43) */
+        int flead = army_leadership(s, FP, fr) - b->forfeit[FP]; if (flead < 0) flead = 0;
+        if (b->white_rider) flead = flead > 0 ? flead - 1 : 0;
+        int foul = has_cc(s, SH, CC_FOUL_STENCH) && naz_lead_now(s) >= flead;
+        if (has_cc(s, SH, CC_THEY_ARE_TERRIBLE) && nl >= 1) { b->forfeit[SH] += 1; srmod++; }
         int fthr = base_threshold(s, FP), sthr = base_threshold(s, SH);
         int fmiss = 0, smiss = 0, sones = 0;
-        int fh = roll_hits(s, fd, fthr, fmod, 0, &fmiss);
-        int sh = roll_hits(s, sd, sthr, smod, &sones, &smiss);
+        wotr_rk_d6 = 7; int fh = roll_hits(s, fd, fthr, fmod, 0, &fmiss);
+        wotr_rk_d6 = 8; int sh = roll_hits(s, sd, sthr, smod, &sones, &smiss);
         if (has_cc(s, FP, CC_CONFUSION)) { fh += sones; smiss -= sones; }
         /* leader re-rolls */
-        int flead = army_leadership(s, FP, fr) - b->forfeit[FP]; if (flead < 0) flead = 0;
         int slead = army_leadership(s, SH, sr) - (b->white_rider ? nazgul_leadership(s, sr) : b->forfeit[SH]);
-        if (b->white_rider) flead = flead > 0 ? flead - 1 : 0;
         if (slead < 0) slead = 0;
-        if (has_cc(s, FP, CC_MIGHTY_ATTACK) && fmiss > 0 && comps && flead > 0) { fmiss--; fh++; flead--; }
-        if (has_cc(s, FP, CC_ANDURIL) && (comps & (1 << C_STRIDER)) && fmiss > 0) {
-            int k = s->aragorn ? 2 : 1; if (k > fmiss) k = fmiss;
-            fmiss -= k; fh += k; flead -= s->aragorn ? 2 : 1; if (flead < 0) flead = 0;
+        if (foul) flead = 0;
+        else {
+            /* the Companions still able to forfeit their Leadership */
+            int lead = 0;
+            for (int c = 0; c < NCOMP; c++) if ((comps >> c) & 1 && !b->dd && comp_leadership(s, c) > 0 && !(b->white_rider && c == C_GANDALF && s->gandalf_white)) lead |= 1 << c;
+            /* Mighty Attack: the Companion of the lowest Leadership forfeits it; one missed die becomes a hit */
+            if (has_cc(s, FP, CC_MIGHTY_ATTACK) && lead) {
+                int best = -1;
+                for (int c = 0; c < NCOMP; c++) if ((lead >> c) & 1 && (best < 0 || comp_leadership(s, c) < comp_leadership(s, best))) best = c;
+                flead -= comp_leadership(s, best);
+                if (fmiss > 0) { fmiss--; fh++; }
+            }
+            /* Anduril: Strider forfeits his Leadership (Aragorn: 2); one missed die (Aragorn: two) becomes a hit */
+            if (has_cc(s, FP, CC_ANDURIL) && (lead >> C_STRIDER) & 1) {
+                int k = s->aragorn ? 2 : 1;
+                flead -= comp_leadership(s, C_STRIDER);
+                if (k > fmiss) k = fmiss;
+                fmiss -= k; fh += k;
+            }
+            if (flead < 0) flead = 0;
         }
-        if (has_cc(s, SH, CC_FOUL_STENCH) && naz_lead_now(s) >= flead) flead = 0;
-        int frr = roll_hits(s, flead < fmiss ? (flead > 5 ? 5 : flead) : (fmiss > 5 ? 5 : fmiss), fthr, frmod, 0, 0);
-        int srr = roll_hits(s, slead < smiss ? (slead > 5 ? 5 : slead) : (smiss > 5 ? 5 : smiss), sthr, srmod, 0, 0);
-        b->reroll_hits[FP] = (uint8_t)frr; b->reroll_hits[SH] = (uint8_t)srr;
-        /* Blade of Westernesse: spend one re-roll hit to slay a Minion */
-        if (has_cc(s, FP, CC_BLADE_OF_WESTERNESSE) && frr > 0 && minions_at(s, sr)) {
-            static const uint8_t pri[3] = {M_WK, M_MOUTH, M_SARUMAN};
-            for (int i = 0; i < 3; i++) if (s->minion_loc[pri[i]] == sr) { kill_minion(s, pri[i]); frr--; break; }
+        wotr_rk_d6 = 9; int frr = roll_hits(s, flead < fmiss ? (flead > 5 ? 5 : flead) : (fmiss > 5 ? 5 : fmiss), fthr, frmod, 0, 0);
+        wotr_rk_d6 = 10; int srr = roll_hits(s, slead < smiss ? (slead > 5 ? 5 : slead) : (smiss > 5 ? 5 : smiss), sthr, srmod, 0, 0);
+        wotr_rk_d6 = 0; b->reroll_hits[FP] = (uint8_t)frr; b->reroll_hits[SH] = (uint8_t)srr;
+        /* initiative 5, the defender's card first: No Quarter / Nameless Wood with a hit in the roll or re-roll, and
+           Mumakil with more hits scored this round than the opponent (pre-combat hits included) */
+        int fsc = b->pre_fp_hits + fh + frr, ssc = b->pre_sh_hits + sh + srr, fadd = 0, sadd = 0;
+        for (int k = 0; k < 2; k++) {
+            int side = k == 0 ? def : att;
+            if (side == FP) {
+                if (has_cc(s, FP, CC_NO_QUARTER) && fh + frr > 0) fadd += 1;
+                if (has_cc(s, FP, CC_NAMELESS_WOOD) && fh + frr > 0) fadd += 2;
+                fsc += fadd;
+            } else if (has_cc(s, SH, CC_MUMAKIL) && ssc > fsc) { sadd++; ssc++; }
         }
-        fh += frr; sh += srr;
-        if (has_cc(s, FP, CC_NO_QUARTER) && fh > 0) fh++;
-        if (has_cc(s, FP, CC_NAMELESS_WOOD) && fh > 0) fh += 2;
-        if (has_cc(s, SH, CC_MUMAKIL) && sh > fh + b->pre_fp_hits) sh++;
-        if (has_cc(s, FP, CC_FATEFUL_STRIKE)) {
-            if (b->reroll_hits[FP] >= 2 && minions_at(s, sr)) {
-                static const uint8_t pri[3] = {M_WK, M_MOUTH, M_SARUMAN};
-                for (int i = 0; i < 3; i++) if (s->minion_loc[pri[i]] == sr) { kill_minion(s, pri[i]); break; }
-            } else if (b->reroll_hits[FP] >= 1 && s->naz[sr]) { s->naz[sr]--; s->pool_naz++; }
-        }
-        if (has_cc(s, SH, CC_BLACK_BREATH) && srr > 0) {
-            static const uint8_t pri[NCOMP] = {C_STRIDER, C_GANDALF, C_BOROMIR, C_GIMLI, C_LEGOLAS, C_MERRY, C_PIPPIN};
-            int done = 0, m = comps_at(s, fr);
-            for (int i = 0; i < NCOMP && !done; i++) if ((m >> pri[i]) & 1 && srr >= comp_level(s, pri[i])) { kill_comp(s, pri[i]); done = 1; }
-            for (int n = 0; n < NFPNAT && !done; n++) if (s->ldr[fr][n]) { s->ldr[fr][n]--; done = 1; }
-        }
-        /* damage reduction */
-        if (has_cc(s, FP, CC_SHIELD_WALL) && sh >= 2) sh--;
-        if (has_cc(s, FP, CC_HEROIC_DEATH) && sh > 0) {
-            int done = 0;
-            for (int n = 0; n < NFPNAT && !done; n++) if (s->ldr[fr][n]) { s->ldr[fr][n]--; sh--; done = 1; }
-            if (!done && sh >= 2) {
-                int m = comps_at(s, fr);
-                for (int c = NCOMP - 1; c >= C_BOROMIR && !done; c--) if ((m >> c) & 1) { int l = comp_level(s, c); kill_comp(s, c); sh -= l < sh ? l : sh; done = 1; }
+        b->hits[FP] = (int8_t)(fh + frr + fadd); b->hits[SH] = (int8_t)(sh + srr + sadd);
+    }
+    /* initiative 6 (before casualties), the defender's card first: the player whose card it is chooses */
+    for (f->v[0] = 0; f->v[0] < 2; f->v[0]++) {
+        if ((f->v[0] == 0 ? def : att) == FP) {
+            /* Blade of Westernesse: one re-roll hit eliminates a Minion of the Free Peoples' choice */
+            if (has_cc(s, FP, CC_BLADE_OF_WESTERNESSE) && b->reroll_hits[FP] > 0 && minions_at(s, sr)) {
+                s->nopt = 0;
+                for (int m = 0; m < NMINION; m++) if (s->minion_loc[m] == sr) s->opt[s->nopt++] = (uint8_t)(Q_MINION + m);
+                if (s->nopt > 1) { s->qtag = Q_BLADE; ASK(D_CARD_OPTION, FP); s->qtag = Q_NONE; } else s->mv.a = s->opt[0];
+                kill_minion(s, s->mv.a - Q_MINION);
+                if (b->hits[FP] > 0) b->hits[FP]--;
+            }
+            /* Fateful Strike: a re-roll hit eliminates a Nazgul, two a Minion (the Witch-king is both): the Free
+               Peoples' choice */
+            if (has_cc(s, FP, CC_FATEFUL_STRIKE) && b->reroll_hits[FP] > 0) {
+                s->nopt = 0;
+                if (s->naz[sr]) s->opt[s->nopt++] = Q_NAZGUL;
+                if (b->reroll_hits[FP] >= 2) for (int m = 0; m < NMINION; m++) if (s->minion_loc[m] == sr) s->opt[s->nopt++] = (uint8_t)(Q_MINION + m);
+                if (s->nopt) {
+                    if (s->nopt > 1) { s->qtag = Q_FATEFUL_STRIKE; ASK(D_CARD_OPTION, FP); s->qtag = Q_NONE; } else s->mv.a = s->opt[0];
+                    if (s->mv.a == Q_NAZGUL) { s->naz[sr]--; s->pool_naz++; } else kill_minion(s, s->mv.a - Q_MINION);
+                }
+            }
+            if (has_cc(s, FP, CC_SHIELD_WALL) && b->hits[SH] >= 2) b->hits[SH]--;
+            /* Heroic Death: a Leader cancels one hit, a Companion up to his Level (Gandalf the White: 3), or none */
+            if (has_cc(s, FP, CC_HEROIC_DEATH) && b->hits[SH] > 0) {
+                s->nopt = 0;
+                for (int n = 0; n < NFPNAT; n++) if (s->ldr[fr][n]) s->opt[s->nopt++] = (uint8_t)(Q_LEADER + n);
+                for (int c = 0; c < NCOMP; c++) if (s->comp_loc[c] == fr) s->opt[s->nopt++] = (uint8_t)c;
+                if (s->nopt) {
+                    s->opt[s->nopt++] = 255;
+                    s->qtag = Q_HEROIC_DEATH; ASK(D_CARD_OPTION, FP); s->qtag = Q_NONE;
+                    if (s->mv.a >= Q_LEADER && s->mv.a < Q_LEADER + NFPNAT) { s->ldr[fr][s->mv.a - Q_LEADER]--; b->hits[SH]--; }
+                    else if (s->mv.a < NCOMP) {
+                        int l = comp_level(s, s->mv.a); if (l > 3) l = 3;
+                        kill_comp(s, s->mv.a);
+                        b->hits[SH] = (int8_t)(b->hits[SH] > l ? b->hits[SH] - l : 0);
+                    }
+                }
+            }
+        } else if (has_cc(s, SH, CC_BLACK_BREATH) && b->reroll_hits[SH] > 0) {
+            /* Black Breath: the Shadow may eliminate a Leader, or a Companion of Level up to its re-roll hits */
+            s->nopt = 0;
+            for (int n = 0; n < NFPNAT; n++) if (s->ldr[fr][n]) s->opt[s->nopt++] = (uint8_t)(Q_LEADER + n);
+            for (int c = 0; c < NCOMP; c++) if (s->comp_loc[c] == fr && (comp_level(s, c) > 3 ? 3 : comp_level(s, c)) <= b->reroll_hits[SH]) s->opt[s->nopt++] = (uint8_t)c;
+            if (s->nopt) {
+                s->opt[s->nopt++] = 255;
+                s->qtag = Q_BLACK_BREATH; ASK(D_CARD_OPTION, SH); s->qtag = Q_NONE;
+                if (s->mv.a >= Q_LEADER && s->mv.a < Q_LEADER + NFPNAT) s->ldr[fr][s->mv.a - Q_LEADER]--;
+                else if (s->mv.a < NCOMP) kill_comp(s, s->mv.a);
             }
         }
-        b->hits[FP] = (int8_t)fh; b->hits[SH] = (int8_t)sh;
     }
     /* 4: casualties, attacker first */
     CALL(push_casualty(s, att, b->src, b->hits[def], 0));
@@ -425,7 +523,9 @@ void fr_round(State *s, Frame *f) {
     if (!units(s, FP, fr) || !units(s, SH, sr)) break;
     /* after-casualty effects (initiative 7) */
     if (has_cc(s, SH, CC_ONSLAUGHT)) {
-        int mx = units(s, SH, sr) - 1; if (mx > 4) mx = 4;
+        int mx = 0;         /* up to four, no more than the units can take: each hit taken earns a die (Card Almanac p. 44) */
+        for (int n = NFPNAT; n < NNAT; n++) mx += s->reg[sr][n] + 2 * s->eli[sr][n];
+        if (mx > 4) mx = 4;
         s->nopt = 0;
         for (int k = 0; k <= mx; k++) s->opt[s->nopt++] = (uint8_t)k;
         f->v[4] = 0;
