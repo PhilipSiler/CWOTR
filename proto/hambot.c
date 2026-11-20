@@ -735,6 +735,13 @@ static void discard_direct(int side, const J *opt) {
     VLOG("  a discard the copy did not expect: %s", CARD_KEY[c]);
 }
 /* Follows one answered decision. look: the events after it (for a hidden Combat card shown later). */
+/* a question that comes after the round's Combat cards (the referee is past them) */
+static int after_cards(const char *k) {
+    static const char *const after[] = { "CASUALTY", "CEASE_ATTACK", "RETREAT", "ADVANCE", "EXTEND_SIEGE", "ACTION", "HUNT_ALLOCATION",
+                                         "FELLOWSHIP_PHASE", "DISCARD_EXCESS_CARD", "MOVE_COMPANIONS", "MOVE_MINIONS", "ARMY_MOVE", "RECRUIT" };
+    for (size_t i = 0; k && i < sizeof after / sizeof *after; i++) if (!strcmp(k, after[i])) return 1;
+    return 0;
+}
 static int follow_choice_(const J *e, int look);
 static int follow_choice(const J *e, int look) { following = 1; int r = follow_choice_(e, look); following = 0; return r; }
 static int follow_choice_(const J *e, int look) {
@@ -886,7 +893,7 @@ static int follow_choice_(const J *e, int look) {
         if (!leaves_ensure()) { VLOG("  no decision in the engine for %s %s", side_key, decision); st.ignored++; break; }
         /* the engine asks a Combat card the referee never asked (by its reading the side had none to play), and the
            referee is already further (any other question): none */
-        if (R.s.dkind == D_BATTLE_CARD && depth <= 0 && decision && strcmp(decision, "COMBAT_CARD") && forced < 4) {
+        if (R.s.dkind == D_BATTLE_CARD && depth <= 0 && after_cards(decision) && forced < 4) {
             int pick = -1;
             for (int i = 0; i < nl && pick < 0; i++) if (alive[i] && L[i].nstep && strstr(L[i].st[0].text, "\"kind\":\"none\"")) pick = i;
             if (pick >= 0) { forced++; VLOG("  %s's Combat card, not asked by the referee: none", SIDE_KEY[R.s.dplayer]); apply_leaf(pick); continue; }
@@ -903,7 +910,7 @@ static int follow_choice_(const J *e, int look) {
             if (opponent_no_card()) continue;
             /* a Combat card question the referee skipped (by its reading, that side had no card to play): none, our
                own side too (the other side's choice comes first) */
-            if (R.s.dkind == D_BATTLE_CARD && depth <= 0 && forced++ < 3) {
+            if (R.s.dkind == D_BATTLE_CARD && depth <= 0 && (after_cards(decision) || (decision && !strcmp(decision, "COMBAT_CARD"))) && forced++ < 3) {
                 int pick = -1;
                 for (int i = 0; i < nl && pick < 0; i++) if (alive[i] && L[i].nstep && strstr(L[i].st[0].text, "\"kind\":\"none\"")) pick = i;
                 if (pick >= 0) {
@@ -971,6 +978,22 @@ static int follow_choice_(const J *e, int look) {
             for (int k = 0; k < nl && pick < 0; k++)
                 if (alive[k] && L[k].nstep && (strstr(L[k].st[0].text, "\"skip\":true") || strstr(L[k].st[0].text, "\"answer\":\"0\"") || strstr(L[k].st[0].text, "\"answer\":\"skip\""))) pick = k;
             if (pick >= 0) { VLOG("  a card's question the referee did not ask: nothing"); apply_leaf(pick); continue; }
+        }
+        /* a "join or stay" the referee did not ask (it went on): that Companion stays */
+        if (depth > 0 && !(decision && !strcmp(decision, "JOIN_GROUP"))) {
+            int any = 0, stays = 0;
+            for (int i = 0; i < nl; i++) if (alive[i] && !leaf_done(i)) {
+                const char *t = L[i].st[depth].text;
+                if (strstr(t, "\"kind\":\"stay\"") || strstr(t, "\"kind\":\"join\"")) { any++; stays += strstr(t, "\"kind\":\"stay\"") != NULL; }
+                else { any = -1000; break; }
+            }
+            if (any > 0 && stays > 0) {
+                for (int i = 0; i < nl; i++) if (alive[i] && !leaf_done(i) && strstr(L[i].st[depth].text, "\"kind\":\"join\"")) alive[i] = 0;
+                VLOG("  a join-or-stay the referee did not ask: stays");
+                depth++;
+                if (all_done()) apply_leaf(first_alive());
+                continue;
+            }
         }
         /* no step agrees: a single-answer step the referee skipped, or a question the engine does not ask */
         int i = first_alive(), distinct = 1;
@@ -1525,7 +1548,7 @@ static int answer(const J *decision, const J *view) {
         for (const J *o = opts->child; o; o = o->next) { const char *k = j_str(o, "kind"); if (k && !strcmp(k, "done")) { VLOG("the engine ended the Fellowship phase already"); return (int)j_get(o, "o")->num; } }
     }
     /* our own Combat card question the referee skipped (by its reading we had no card to play): none */
-    for (int g = 0; g < 2 && kind && strcmp(kind, "COMBAT_CARD") && leaves_ensure() && R.s.dplayer == me && R.s.dkind == D_BATTLE_CARD && depth == 0; g++) {
+    for (int g = 0; g < 2 && after_cards(kind) && leaves_ensure() && R.s.dplayer == me && R.s.dkind == D_BATTLE_CARD && depth == 0; g++) {
         int pick = -1;
         for (int i = 0; i < nl && pick < 0; i++) if (alive[i] && L[i].nstep && strstr(L[i].st[0].text, "\"kind\":\"none\"")) pick = i;
         if (pick < 0) break;
