@@ -1443,12 +1443,32 @@ static int opt_fits(const J *opt, const J *want) {
     return extra;
 }
 static int opt_number(const J *opt, int pos) { const J *o = j_get(opt, "o"); return o && o->type == J_NUM ? (int)o->num : pos; }
+static int find_option(const J *opts, const char *steptext);
+/* The reference referee words three die actions differently from us: a card played with an Event die keeps its own type in
+   "as"; hiding with Strider as guide is always "hide_fellowship_strider"; an attack with a Character die is always
+   "attack_with_leader". Try our move again in those words. */
+static int find_reworded(const J *opts, const char *steptext) {
+    static const char *const SWAP[][2] = { { "\"hide_fellowship\"", "\"hide_fellowship_strider\"" }, { "\"hide_fellowship_strider\"", "\"hide_fellowship\"" },
+                                           { "\"attack\"", "\"attack_with_leader\"" }, { "\"attack_with_leader\"", "\"attack\"" } };
+    char buf[260]; const char *p = strstr(steptext, ",\"as\":\"");
+    if (p) { const char *q = strchr(p + 7, '"'); if (!q) return -1; snprintf(buf, sizeof buf, "%.*s%s", (int)(p - steptext), steptext, q + 1); return find_option(opts, buf); }
+    for (int i = 0; i < 4; i++) if ((p = strstr(steptext, SWAP[i][0])) != NULL && strncmp(p - 9, "\"action\":", 9) == 0) {
+        snprintf(buf, sizeof buf, "%.*s%s%s", (int)(p - steptext), steptext, SWAP[i][1], p + strlen(SWAP[i][0]));
+        char buf2[262]; snprintf(buf2, sizeof buf2, "{%s", buf); char *mem; const J *w = j_parse(buf2, &mem); if (!w) return -1;
+        int best = -1, be = 1 << 30, pos = 0;
+        for (const J *o = opts ? opts->child : NULL; o; o = o->next, pos++) { int e = opt_fits(o, w); if (e >= 0 && e < be) { be = e; best = opt_number(o, pos); } }
+        free(mem); return best;
+    }
+    return -1;
+}
 static int find_option(const J *opts, const char *steptext) {      /* the option's number, or -1 */
     char buf[260], *mem; snprintf(buf, sizeof buf, "{%s", steptext);
     const J *want = j_parse(buf, &mem); if (!want) return -1;
     int best = -1, be = 1 << 30, pos = 0;
     for (const J *o = opts ? opts->child : NULL; o; o = o->next, pos++) { int e = opt_fits(o, want); if (e >= 0 && e < be) { be = e; best = opt_number(o, pos); } }
+    int act = j_str(want, "action") != NULL;
     free(mem);
+    if (best < 0 && act) best = find_reworded(opts, steptext);
     return best;
 }
 static int find_kind(const J *opts, const char *kind) {             /* the first option of that kind, or -1 */
@@ -1859,8 +1879,8 @@ static int cmd_bot(int argc, char **argv) {
         if (!type) { free(mem); continue; }
         if (!strcmp(type, "hello")) {
             const char *tok = getenv("WOTR_BOT_TOKEN");
-            if (tok) snprintf(out, sizeof out, "{\"type\":\"hello\",\"id\":%d,\"protocol\":\"wotr-bot/0.2\",\"name\":\"CWOTR\",\"version\":\"0.2\",\"events\":false,\"rulesets\":[\"base\"],\"token\":\"%s\"}", id, tok);
-            else snprintf(out, sizeof out, "{\"type\":\"hello\",\"id\":%d,\"protocol\":\"wotr-bot/0.2\",\"name\":\"CWOTR\",\"version\":\"0.2\",\"events\":false,\"rulesets\":[\"base\"]}", id);
+            if (tok) snprintf(out, sizeof out, "{\"type\":\"hello\",\"id\":%d,\"protocol\":\"wotr-bot/0.2\",\"name\":\"CWOTR\",\"version\":\"0.3\",\"events\":false,\"rulesets\":[\"base\"],\"token\":\"%s\"}", id, tok);
+            else snprintf(out, sizeof out, "{\"type\":\"hello\",\"id\":%d,\"protocol\":\"wotr-bot/0.2\",\"name\":\"CWOTR\",\"version\":\"0.3\",\"events\":false,\"rulesets\":[\"base\"]}", id);
             send_line(out);
         } else if (!strcmp(type, "new_game")) {
             B.me = side_of(j_str(m, "side")); if (B.me < 0) B.me = FP;
