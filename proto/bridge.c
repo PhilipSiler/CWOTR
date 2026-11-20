@@ -1317,6 +1317,10 @@ typedef struct {
     State prev; Move prevmv[2]; int nprev, prev_ok;     /* the position before our last move, and the move: the Hunt it sets off is played again from here */
     int naz_plan; uint8_t naz_tgt[NREG], wk_tgt, mouth_tgt;       /* where our player's Nazgul plan puts them: carried out one figure at a time */
     int box_turn, box_now, box_prev;        /* Free Peoples dice seen in the Hunt box this turn and the turn before (the view at the start of a turn no longer shows them) */
+    int siege_open;             /* set by bot_view: a region the view marks besieged with no besieger in it yet */
+    State F; int follow;        /* after a Hunt answer given by the engine: the position that follows it, for the questions that follow (a new Guide) */
+    State cb, ca; int cdiff, cused[NREG], cused_eli, cused_reg;     /* the card we last played, before and after in our engine: where the site asks what our engine settles by itself, we answer as the engine did */
+    int sel_on, sel_reg, sel_eli;       /* our last attack: how many Regulars and Elites it takes, for the "how many go along" questions */
     uint64_t rng;
 } Bot;
 
@@ -1426,6 +1430,8 @@ static int bot_view(Bot *B, const J *v, int who, char *err, int en) {      /* wh
     s->winner = 0; s->win_type = WIN_NONE; s->act_moves_left = 0; s->lock[0] = s->lock[1] = 0; s->comp_moved = 0; memset(&s->b, 0, sizeof s->b);
     s->dplayer = (uint8_t)who; s->st[s->sp - 1].v[0] = (uint8_t)who;
     wotr_determinize(s, me, B->rng += 0x1234567);
+    B->siege_open = -1;         /* defenders just withdrew into a Stronghold and nobody has advanced yet: no siege as our engine counts it */
+    for (int r = 0; r < NREG; r++) if (s->siege[r] && (!units(s, FP, r) || !units(s, SH, r))) { s->siege[r] = 0; B->siege_open = r; }
     if (wotr_check(s, err, en)) return strstr(err, "hand over limit") ? 0 : 1;      /* (a hand over the limit is what a discard question looks like) */
     return 0;
 }
@@ -1551,7 +1557,7 @@ static int bot_battle(Bot *B, const J *v, const J *dec, int target) {
     if (att < 0 || to < 0) return 0;
     if (from < 0) from = to;
     char err[200];
-    if (bot_view(B, v, att, err, sizeof err)) return 0;
+    if (bot_view(B, v, att, err, sizeof err)) { if (getenv("WOTR_BOT_DEBUG")) fprintf(stderr, "bot: battle question, cannot rebuild the position: %s\n", err); return 0; }
     State pre = B->R.s;
     pre.dice[att][F_ARMY]++;                                    /* the die that started the battle is spent in the view */
     int areg = 0, aeli = 0, round = j_int(bt, "round", 1), hits = j_int(j_get(dec, "context"), "hits", -1), card[2] = {-1, -1};
@@ -1559,40 +1565,49 @@ static int bot_battle(Bot *B, const J *v, const J *dec, int target) {
       for (const J *u = al ? al->child : NULL; u; u = u->next) { const char *k = j_str(u, "unit"); if (k && !strcmp(k, "regular")) areg += j_int(u, "n", 1); else if (k && !strcmp(k, "elite")) aeli += j_int(u, "n", 1); } }
     card[att] = card_of(j_str(bt, "attacker_card")); card[1 - att] = card_of(j_str(bt, "defender_card"));
     for (int k = 0; k < 2; k++) if (card[k] >= 0 && pre.card_where[card[k]] != W_HAND && pre.card_where[card[k]] != W_TABLE) { pre.card_where[card[k]] = W_HAND; pre.hand_n[CARD_SIDE(card[k])]++; }
-    static Move mv[MAXMOVES], o[MAXMOVES];
+    static Move mv[MAXMOVES], o[MAXMOVES]; int into = 0;
+    if (target == D_ADVANCE) {          /* the defenders are gone from the view: one stand-in is put back, to be beaten again */
+        if (getenv("WOTR_BOT_DEBUG")) fprintf(stderr, "bot: advance setup %s>%s defenders %d siege %d\n", REGION_KEY[from], REGION_KEY[to], units(&pre, 1 - att, to), pre.siege[to]);
+        if (from == to) return 0;
+        if (units(&pre, 1 - att, to)) { if (!pre.siege[to] && B->siege_open != to) return 0; pre.siege[to] = 0; into = 1; }        /* the defenders withdrew into the Stronghold: they are put back in the field to withdraw again */
+        else { int dn = REGION[to].nation != NO_NATION && NAT_SIDE(REGION[to].nation) == 1 - att ? REGION[to].nation : att == SH ? 0 : NFPNAT; pre.reg[to][dn] = 1; }
+    }
     wotr_prune = 0;
     int n = wotr_moves(&pre, mv), pick = -1, best = -1;
     for (int i = 0; i < n; i++) if (mv[i].type == M_ATTACK && mv[i].a == from && mv[i].b == to) { int sc = mv[i].c == areg && mv[i].d == aeli ? 1000 : mv[i].c + mv[i].d; if (sc > best) { best = sc; pick = i; } }
+    if (target == D_ADVANCE && getenv("WOTR_BOT_DEBUG")) fprintf(stderr, "bot: advance %s>%s: attack found %d, into siege %d, defenders %d, attackers %d (view says %d+%d), control %d\n", REGION_KEY[from], REGION_KEY[to], pick >= 0, into, units(&pre, 1 - att, to), units(&pre, att, from), areg, aeli, pre.ctrl[to]);
     if (pick < 0) return 0;
     int tot0 = units(&pre, FP, from) + units(&pre, SH, from) + (to != from ? units(&pre, FP, to) + units(&pre, SH, to) : 0);
+    int dbg[ND + 1]; memset(dbg, 0, sizeof dbg);
     for (uint64_t seed = 1; seed <= 3000; seed++) {
         State t = pre; t.rng = seed * 0x9E3779B97F4A7C15ULL + B->rng;
         wotr_apply(&t, mv[pick]);
         if (t.b.active && round > 1) { t.b.round = (uint8_t)round; if (t.b.siege && t.b.max_rounds < round) t.b.max_rounds = (uint8_t)round; }
-        for (int stp = 0; stp < 24 && !t.winner && t.b.active; stp++) {
+        for (int stp = 0; stp < 24 && !t.winner && (t.b.active || t.dkind == D_ADVANCE); stp++) {
             int mine = t.dplayer == B->me, ch = -1, fail = 0;
             int tot = units(&t, FP, from) + units(&t, SH, from) + (to != from ? units(&t, FP, to) + units(&t, SH, to) : 0);
             if (mine && t.dkind == target) {
                 const Frame *f = &t.st[t.sp - 1];
-                int ok = target == D_CASUALTY ? f->kind == FR_CASUALTY && (hits < 0 || f->v[2] == hits) : tot == tot0;
+                int ok = target == D_CASUALTY ? f->kind == FR_CASUALTY && (hits < 0 || f->v[2] == hits) : target == D_ADVANCE ? tot == tot0 - !into : tot == tot0;
                 if (ok) { B->R.s = t; return 1; }
-                break;
+                dbg[ND]++; break;
             }
             int k = wotr_moves(&t, o);
             if (k <= 0) break;
             switch (t.dkind) {
-            case D_SIEGE_RETREAT: for (int j = 0; j < k; j++) if (o[j].a == 0) ch = j; break;                       /* the battle goes on in the field */
+            case D_SIEGE_RETREAT: for (int j = 0; j < k; j++) if (o[j].a == into) ch = j; break;                       /* the battle goes on in the field */
             case D_BATTLE_CARD: { int want = card[t.dplayer] >= 0 ? card[t.dplayer] : 255; for (int j = 0; j < k; j++) if (o[j].a == want) ch = j; if (ch < 0) for (int j = 0; j < k; j++) if (o[j].a == 255) ch = j; break; }
             case D_CONTINUE: for (int j = 0; j < k; j++) if (o[j].a == 1) ch = j; break;
             case D_RETREAT: for (int j = 0; j < k; j++) if (o[j].a == 255) ch = j; break;
-            case D_CASUALTY: if (target == D_CASUALTY && !mine) ch = 0; else fail = 1; break;
+            case D_CASUALTY: if ((target == D_CASUALTY || target == D_ADVANCE) && !mine) ch = 0; else fail = 1; break;
             case D_SIEGE_EXTEND: case D_ADVANCE: fail = 1; break;
             default: ch = 0; break;
             }
-            if (fail) break;
+            if (fail) { dbg[t.dkind]++; break; }
             wotr_apply(&t, o[ch < 0 ? 0 : ch]);
         }
     }
+    if (target == D_ADVANCE && getenv("WOTR_BOT_DEBUG")) fprintf(stderr, "bot: advance not reached: stopped at own casualty %d, target but board differs %d, advance/extend %d\n", dbg[D_CASUALTY], dbg[ND], dbg[D_ADVANCE] + dbg[D_SIEGE_EXTEND]);
     return 0;
 }
 /* Our player's move in the position we hold, as one of the leaves; -1 if it is not among them. */
@@ -1618,6 +1633,9 @@ static void bot_applied(Bot *B) {       /* every answer of the chosen move is gi
     B->prev = before; memcpy(B->prevmv, B->pmv, sizeof B->prevmv); B->nprev = B->npmv; B->prev_ok = 1;
     for (int k = 0; k < B->npmv; k++) if (!s->winner) wotr_apply(s, B->pmv[k]);
     B->valid = !s->winner && s->dplayer == B->me && s->nrand == nr && chain_dkind(s->dkind);
+    if (B->npmv > 0 && B->pmv[0].type == M_PLAY) { B->cb = before; B->ca = *s; B->cdiff = 1 + B->pmv[0].a; memset(B->cused, 0, sizeof B->cused); B->cused_eli = B->cused_reg = 0; }
+    if (!B->valid && getenv("WOTR_BOT_DEBUG") && B->pmv[0].type == M_PLAY)
+        fprintf(stderr, "bot: after playing %s our engine asks: winner %d, side %s, question %d, random draws %d, card asking %s\n", CARD_KEY[B->pmv[0].a], s->winner, SIDE_KEY[s->dplayer], s->dkind, (int)(s->nrand - nr), card_asking(s) >= 0 ? CARD_KEY[card_asking(s)] : "-");
     if (B->valid) dice_sync(&B->R, &before, B->me, -1);
     B->npend = B->ipend = 0; B->npmv = 0;
 }
@@ -1733,6 +1751,7 @@ static int bot_take(Bot *B, const Leaf *L, int nl, int i, int kind, const J *opt
     if (find_option(opts, L[i].st[0].text) < 0)
         for (int j = 0; j < nl; j++) if (j != i && L[j].nmv == L[i].nmv && !memcmp(L[j].mv, L[i].mv, sizeof(Move) * L[i].nmv) && L[j].nstep > 0 && find_option(opts, L[j].st[0].text) >= 0) { i = j; break; }
     if ((o = find_option(opts, L[i].st[0].text)) < 0) return -1;
+    if (L[i].mv[0].type == M_ATTACK) { B->sel_on = 1; B->sel_reg = L[i].mv[0].c; B->sel_eli = L[i].mv[0].d; }
     memcpy(B->pend, L[i].st, sizeof(Step) * L[i].nstep); B->npend = L[i].nstep; B->ipend = 1;
     B->npmv = L[i].nmv; memcpy(B->pmv, L[i].mv, sizeof(Move) * L[i].nmv);
     if (B->ipend == B->npend) bot_applied(B);
@@ -1760,7 +1779,7 @@ static int bot_decide(Bot *B, Agent *ag, const J *dec, const J *v) {
     }
     if (kind == K_ACTION) {             /* a fresh picture from the view */
         char err[200];
-        B->prev_ok = 0; B->naz_plan = 0;
+        B->prev_ok = 0; B->naz_plan = 0; B->sel_on = 0; B->follow = 0; B->cdiff = 0;
         B->valid = !bot_view(B, v, B->me, err, sizeof err);
         if (!B->valid) { B->n_rebuild_fail++; fprintf(stderr, "bot: cannot rebuild the position (turn %d): %s\n", j_int(v, "turn", 0), err); }
     }
@@ -1785,12 +1804,37 @@ static int bot_decide(Bot *B, Agent *ag, const J *dec, const J *v) {
             if ((o = bot_take(B, L, nl, i, kind, opts)) >= 0) { B->n_engine++; return o; }
         }
         B->n_nomatch++; B->valid = 0;
+        if (getenv("WOTR_BOT_DEBUG")) fprintf(stderr, "bot: at decision %d, engine question %d:\n", (int)B->n_dec, B->R.s.dkind);
         if (i >= 0) fprintf(stderr, "bot: our move is not among the referee's options (%s: %s)\n", kind >= 0 ? KIND_KEY[kind] : "?", L[i].nstep ? L[i].st[0].text : "");
         else fprintf(stderr, "bot: our move is not among our own leaves (%s, engine question %d)\n", kind >= 0 ? KIND_KEY[kind] : "?", B->R.s.dkind);
     } else if (kind != K_ACTION) B->valid = 0;         /* something happened that our picture does not follow */
+    if (B->follow && kind != K_ACTION && !B->valid && !B->F.winner && B->F.dplayer == B->me && B->F.dkind != D_ACTION) {    /* what follows our Hunt answer */
+        B->R.s = B->F; wotr_prune = 0;
+        int nl = build_leaves(&B->R, L);
+        if (same_question(L, nl, kind, opts)) {
+            int i = bot_pick(B, ag, L, nl);
+            if (i >= 0 && L[i].nstep > 0 && (o = find_option(opts, L[i].st[0].text)) >= 0) { wotr_apply(&B->F, L[i].mv[0]); B->n_hunt++; return o; }
+        }
+    }
+    if (B->follow && kind == K_CHOOSE_GUIDE && !B->valid && B->F.guide < NCOMP && (o = find_kv(opts, "guide", "character", CHAR_KEY[B->F.guide])) >= 0) { B->n_hunt++; return o; }   /* our engine names the new Guide without asking */
+    if (B->follow && kind != K_ACTION && getenv("WOTR_BOT_DEBUG")) fprintf(stderr, "bot: decision %d (%s) does not follow our Hunt answer: our engine has winner %d, side %s, question %d, guide %d\n", (int)B->n_dec, kind >= 0 ? KIND_KEY[kind] : "?", B->F.winner, SIDE_KEY[B->F.dplayer], B->F.dkind, B->F.guide);
+    B->follow = 0;
+    if (kind == K_GUIDE_ABILITY && j_len(opts) > 1 && bot_hunt(B, dec, D_HUNT_RESPONSE)) {      /* our engine asks this inside its one Hunt question */
+        wotr_prune = 0;
+        int nl = build_leaves(&B->R, L), has = 0, i;
+        for (int j = 0; j < nl; j++) has |= L[j].nstep > 0 && strstr(L[j].st[0].text, "\"guide_ability\"") != NULL;
+        B->valid = 0;
+        if (has && (i = bot_pick(B, ag, L, nl)) >= 0 && (o = find_kind(opts, strstr(L[i].st[0].text, "\"guide_ability\"") ? "use" : "skip")) >= 0) { B->n_hunt++; return o; }
+    }
+    if (kind == K_ARMY_SELECTION && B->sel_on && j_len(opts) > 1) {      /* the part of the Army our attack takes; Leaders and characters all go */
+        const J *cx = j_get(dec, "context"); const char *u = j_str(cx, "unit"); int av = j_int(cx, "available", 99), pos = 0;
+        int *left = u && !strcmp(u, "regular") ? &B->sel_reg : u && !strcmp(u, "elite") ? &B->sel_eli : NULL;
+        int want = left ? (*left < av ? *left : av) : av;
+        for (const J *x = opts->child; x; x = x->next, pos++) if (j_int(x, "count", -1) == want) { if (left) *left -= want; B->n_chain++; return opt_number(x, pos); }
+    }
     {   /* a question inside a battle: set the engine down in it and let our player answer */
         int target = kind == K_COMBAT_CARD ? D_BATTLE_CARD : kind == K_CASUALTY ? D_CASUALTY : kind == K_FIELD_OR_SIEGE ? D_SIEGE_RETREAT : kind == K_CEASE_ATTACK ? D_CONTINUE
-                   : kind == K_RETREAT ? D_RETREAT : kind == K_EXTEND_SIEGE ? D_SIEGE_EXTEND : -1;
+                   : kind == K_RETREAT ? D_RETREAT : kind == K_EXTEND_SIEGE ? D_SIEGE_EXTEND : kind == K_ADVANCE ? D_ADVANCE : -1;
         if (target >= 0 && j_len(opts) > 1 && !getenv("WOTR_BOT_NOBATTLE") && bot_battle(B, v, dec, target)) {
             wotr_prune = 0;
             int nl = build_leaves(&B->R, L), i = nl ? bot_pick(B, ag, L, nl) : -1;
@@ -1804,7 +1848,7 @@ static int bot_decide(Bot *B, Agent *ag, const J *dec, const J *v) {
         wotr_prune = 0;
         int nl = build_leaves(&B->R, L), i = nl ? bot_pick(B, ag, L, nl) : -1;
         B->valid = 0;
-        if (i >= 0 && L[i].nstep > 0 && (o = find_option(opts, L[i].st[0].text)) >= 0) { B->n_hunt++; return o; }
+        if (i >= 0 && L[i].nstep > 0 && (o = find_option(opts, L[i].st[0].text)) >= 0) { B->F = B->R.s; wotr_apply(&B->F, L[i].mv[0]); B->follow = 1; B->n_hunt++; return o; }
     }
     if ((kind == K_FELLOWSHIP_PHASE && B->me == FP) || (kind == K_HUNT_ALLOCATION && B->me == SH)) {
         static Move mv[MAXMOVES];
@@ -1844,6 +1888,21 @@ static int bot_decide(Bot *B, Agent *ag, const J *dec, const J *v) {
         B->valid = 0;
         if (i >= 0 && L[i].nstep > 0 && (o = find_option(opts, L[i].st[0].text)) >= 0) { B->n_hunt++; return o; }
     }
+    if (kind == K_CARD_CHOICE && j_len(opts) > 1 && B->cdiff && card_of(j_str(j_get(dec, "context"), "card")) == B->cdiff - 1) {
+        /* a question about the card we just played that our engine settled by itself: answer as the engine did, read off its board before and after */
+        int me = B->me, lo = me == FP ? 0 : NFPNAT, hi = me == FP ? NFPNAT : NNAT, pos = 0, bo = -1, bg = 0, br = -1, de = 0, dr = 0;
+        int own[2][NREG];
+        for (int r = 0; r < NREG; r++) { own[0][r] = own[1][r] = 0; for (int n = lo; n < hi; n++) { own[0][r] += B->cb.reg[r][n] + B->cb.eli[r][n]; own[1][r] += B->ca.reg[r][n] + B->ca.eli[r][n]; de += B->ca.eli[r][n] - B->cb.eli[r][n]; dr += B->ca.reg[r][n] - B->cb.reg[r][n]; } }
+        for (const J *x = opts->child; x; x = x->next, pos++) {
+            const char *an = j_str(x, "answer"); int r = region_of(j_str(x, "region")), fr = region_of(j_str(x, "from")), to = region_of(j_str(x, "to")), g = 0;
+            if (fr >= 0 && to >= 0) { g = own[1][to] - own[0][to] - B->cused[to]; if (own[1][fr] >= own[0][fr]) g = 0; r = to; }
+            else if (r >= 0) g = own[1][r] - own[0][r] - B->cused[r];
+            else if (an && !strcmp(an, "ELITE")) { g = de - B->cused_eli > 0 ? 3 : 0; r = -2; }
+            else if (an && !strcmp(an, "REGULAR")) { g = dr - B->cused_reg > 0 ? 2 : 0; r = -3; }
+            if (g > bg) { bg = g; bo = opt_number(x, pos); br = r; }
+        }
+        if (bo >= 0) { if (br >= 0) B->cused[br]++; else if (br == -2) B->cused_eli++; else B->cused_reg++; B->n_chain++; return bo; }
+    }
     if (kind == K_DISCARD_EXCESS_CARD && j_len(opts) > 1) {       /* the discard that leaves the position our network likes best */
         char err[200];
         if (!bot_view(B, v, B->me, err, sizeof err)) {
@@ -1860,6 +1919,11 @@ static int bot_decide(Bot *B, Agent *ag, const J *dec, const J *v) {
         }
     }
     o = bot_rule(B, kind, dec, v);
+    if (j_len(opts) > 1 && getenv("WOTR_BOT_DEBUG")) {
+        const J *cx = j_get(dec, "context"), *c0 = opts->child;
+        fprintf(stderr, "bot: by rule, decision %d, %s, %d options, card %s, first option kind %s answer %s\n", (int)B->n_dec, kind >= 0 ? KIND_KEY[kind] : "?", j_len(opts),
+                j_str(cx, "card") ? j_str(cx, "card") : j_str(c0, "card") ? j_str(c0, "card") : "-", j_str(c0, "kind") ? j_str(c0, "kind") : "-", j_str(c0, "answer") ? j_str(c0, "answer") : "-");
+    }
     B->n_rule++; B->n_rule_kind[kind >= 0 && kind < NKIND ? kind : NKIND] += j_len(opts) > 1;
     return o;
 }
@@ -1879,8 +1943,8 @@ static int cmd_bot(int argc, char **argv) {
         if (!type) { free(mem); continue; }
         if (!strcmp(type, "hello")) {
             const char *tok = getenv("WOTR_BOT_TOKEN");
-            if (tok) snprintf(out, sizeof out, "{\"type\":\"hello\",\"id\":%d,\"protocol\":\"wotr-bot/0.2\",\"name\":\"CWOTR\",\"version\":\"0.3\",\"events\":false,\"rulesets\":[\"base\"],\"token\":\"%s\"}", id, tok);
-            else snprintf(out, sizeof out, "{\"type\":\"hello\",\"id\":%d,\"protocol\":\"wotr-bot/0.2\",\"name\":\"CWOTR\",\"version\":\"0.3\",\"events\":false,\"rulesets\":[\"base\"]}", id);
+            if (tok) snprintf(out, sizeof out, "{\"type\":\"hello\",\"id\":%d,\"protocol\":\"wotr-bot/0.2\",\"name\":\"CWOTR\",\"version\":\"0.4\",\"events\":false,\"rulesets\":[\"base\"],\"token\":\"%s\"}", id, tok);
+            else snprintf(out, sizeof out, "{\"type\":\"hello\",\"id\":%d,\"protocol\":\"wotr-bot/0.2\",\"name\":\"CWOTR\",\"version\":\"0.4\",\"events\":false,\"rulesets\":[\"base\"]}", id);
             send_line(out);
         } else if (!strcmp(type, "new_game")) {
             B.me = side_of(j_str(m, "side")); if (B.me < 0) B.me = FP;
