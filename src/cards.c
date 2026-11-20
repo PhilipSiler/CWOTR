@@ -46,7 +46,8 @@ static void shadows_gather_opts(State *s, int src, int steps) {
     army_reach(s, SH, src, steps, reach);
     s->nopt = 0;
     for (int r = 0; r < NREG; r++)
-        if (reach[r] && units(s, SH, r) && !(s->siege[r] && s->ctrl[r] == SH) && units(s, SH, r) + units(s, SH, src) <= 10) s->opt[s->nopt++] = (uint8_t)r;
+        /* (the Army may split first: following a player, a part small enough to stack there may go) */
+        if (reach[r] && units(s, SH, r) && !(s->siege[r] && s->ctrl[r] == SH) && units(s, SH, r) + (wotr_prune ? units(s, SH, src) : 1) <= 10) s->opt[s->nopt++] = (uint8_t)r;
 }
 static int woses_dest(const State *s, int r) {
     if (r == R_MINAS_TIRITH) return s->ctrl[r] == FP && !s->siege[r] && can_enter_army(s, FP, r, r);
@@ -172,14 +173,20 @@ void push_card(State *s, int c, int by_event_die) {
 void fr_card(State *s, Frame *f) {
     CO_BEGIN
     CALL(push(s, FR_CARDFX)->v[0] = f->v[0]);
+    /* the hand limit after each draw step, not only at the end of the action (Card Almanac p. 3, 46) */
+    if (!s->rng_max && !s->winner && s->hand_n[FP] > 6) CALL(push(s, FR_DISCARD)->v[0] = FP);
+    if (!s->rng_max && !s->winner && s->hand_n[SH] > 6) CALL(push(s, FR_DISCARD)->v[0] = SH);
     if (f->v[8] && !s->winner) {
-        int c = f->v[0];
         /* (not while card_has_effect is trying the card out: these bonus draws are not the card's own effect) */
-        if (!s->rng_max && CARD_SIDE(c) == FP && s->guide == C_GANDALF && s->comp_loc[C_GANDALF] == LOC_FSP) draw_card(s, CARD_DECK(c));
-        if (!s->rng_max && CARD_SIDE(c) == SH && ON_TABLE(CARD_THE_PALANTIR_OF_ORTHANC) && c != CARD_THE_PALANTIR_OF_ORTHANC) {
+        if (!s->rng_max && CARD_SIDE(f->v[0]) == FP && s->guide == C_GANDALF && s->comp_loc[C_GANDALF] == LOC_FSP) {
+            draw_card(s, CARD_DECK(f->v[0]));
+            if (s->hand_n[FP] > 6) CALL(push(s, FR_DISCARD)->v[0] = FP);
+        }
+        if (!s->rng_max && CARD_SIDE(f->v[0]) == SH && ON_TABLE(CARD_THE_PALANTIR_OF_ORTHANC) && f->v[0] != CARD_THE_PALANTIR_OF_ORTHANC) {
             s->nopt = 2; s->opt[0] = 0; s->opt[1] = 1;          /* either deck */
             ASK(D_CARD_OPTION, SH);
             draw_card(s, 2 + s->mv.a);
+            if (s->hand_n[SH] > 6) CALL(push(s, FR_DISCARD)->v[0] = SH);
         }
     }
     CO_END
@@ -188,11 +195,15 @@ void fr_card(State *s, Frame *f) {
 static void comp_group_opts(State *s, int include_map) {
     int fc = fsp_comps(s);      /* on the Mordor Track separation means elimination (fr_separate) */
     s->nopt = 0;
-    for (int a = 0; a < NCOMP; a++) if ((fc >> a) & 1) {
-        s->opt[s->nopt++] = (uint8_t)(1 << a);
-        for (int b = a + 1; b < NCOMP; b++) if ((fc >> b) & 1) s->opt[s->nopt++] = (uint8_t)((1 << a) | (1 << b));
+    if (!wotr_prune) {          /* any group may go (following a player): every one */
+        for (unsigned g = 1; g < 128 && s->nopt < MAXOPT - 16; g++) if (!(g & ~(unsigned)fc)) s->opt[s->nopt++] = (uint8_t)g;
+    } else {
+        for (int a = 0; a < NCOMP; a++) if ((fc >> a) & 1) {
+            s->opt[s->nopt++] = (uint8_t)(1 << a);
+            for (int b = a + 1; b < NCOMP; b++) if ((fc >> b) & 1) s->opt[s->nopt++] = (uint8_t)((1 << a) | (1 << b));
+        }
+        if (__builtin_popcount((unsigned)fc) > 2) s->opt[s->nopt++] = (uint8_t)fc;
     }
-    if (__builtin_popcount((unsigned)fc) > 2) s->opt[s->nopt++] = (uint8_t)fc;
     if (include_map) {
         int seen = 0;
         for (int c = 0; c < NCOMP; c++) {
@@ -458,14 +469,17 @@ void fr_cardfx(State *s, Frame *f) {
         if (s->naz[s->fsp_loc] || s->minion_loc[M_WK] == s->fsp_loc) {
             if (c == CARD_NAZGUL_SEARCH) { if (!s->revealed) CALL(push_reveal(s)); }
             else {
-                s->nopt = 0; s->opt[s->nopt++] = 0;
-                for (int k = 0; k < 24; k++) if (ON_TABLE(k)) { s->opt[s->nopt++] = 1; break; }
-                s->opt[s->nopt++] = 2;
-                ASK(D_CARD_OPTION, SH);
-                if (s->mv.a == 1) {
-                    static const uint8_t pri[] = {CARD_MITHRIL_COAT_AND_STING, CARD_WIZARDS_STAFF, CARD_AXE_AND_BOW, CARD_HORN_OF_GONDOR};
-                    for (int i = 0; i < 4; i++) if (ON_TABLE(pri[i])) { discard_card(s, pri[i]); break; }
-                } else if (s->mv.a == 2) CALL(push_hunt(s, HM_ROLL, 0));
+                /* the Shadow's choice: any Free Peoples Character card on the table, a Hunt roll (with Shadow dice in the
+                   Hunt Box), or nothing (card text) */
+                s->nopt = 0;
+                for (int k = 0; k < 24; k++) if (ON_TABLE(k)) s->opt[s->nopt++] = (uint8_t)k;
+                if (s->hunt_sh > 0) s->opt[s->nopt++] = Q_HUNT;
+                if (s->nopt) {
+                    s->opt[s->nopt++] = 255;
+                    s->qtag = Q_NAZGUL_STRIKE; ASK(D_CARD_OPTION, SH); s->qtag = Q_NONE;
+                    if (s->mv.a < 24) discard_card(s, s->mv.a);
+                    else if (s->mv.a == Q_HUNT) CALL(push_hunt(s, HM_ROLL, 0));
+                }
             }
         }
     } else if (c == CARD_CRUEL_WEATHER) {
@@ -483,7 +497,7 @@ void fr_cardfx(State *s, Frame *f) {
                 f->v[1] = (uint8_t)x;
             }
             YESNO();
-            ASK(D_CARD_OPTION, FP);
+            s->qtag = Q_LURE; ASK(D_CARD_OPTION, FP); s->qtag = Q_NONE;     /* 0: corruption, 1: eliminate */
             if (!s->mv.a) add_corruption(s, comp_level(s, f->v[1]));
             else if (f->v[1] >= C_MERRY) { CALL(push_separate(s, 1 << f->v[1], 0, 0, 0)); }
             else kill_comp(s, f->v[1]);
@@ -491,8 +505,10 @@ void fr_cardfx(State *s, Frame *f) {
     } else if (c == CARD_THE_BREAKING_OF_THE_FELLOWSHIP) {
         if (s->guide == GOLLUM || !fsp_comps(s)) add_corruption(s, 1);
         else {
+            /* the tile is drawn as any Shadow draw: Wizard's Staff and Mithril Coat and Sting may answer it (Card Almanac p. 25) */
+            CALL(push_hunt(s, HM_CARD, HF_DRAW_ONLY));
             {
-                int t = draw_tile(s), n = 0;
+                int t = s->hunt_drawn, n = 0;
                 if (t == T_3 || t == T_ON_ON) n = 3; else if (t == T_2 || t == T_2R) n = 2; else if (t == T_1 || t == T_1R || t == T_GIVE_USS) n = 1;
                 else if (t == T_SHELOB) n = d6(s);
                 int m = fsp_comps(s), pc = __builtin_popcount((unsigned)m);
@@ -547,18 +563,22 @@ void fr_cardfx(State *s, Frame *f) {
     } else if (c == CARD_THE_RINGWRAITHS_ARE_ABROAD || c == CARD_THE_BLACK_CAPTAIN_COMMANDS) {
         f->v[2] = c == CARD_THE_RINGWRAITHS_ARE_ABROAD ? 1 : 2;       /* army filter: needs Nazgul / needs the Witch-king */
         if (c == CARD_THE_BLACK_CAPTAIN_COMMANDS) {
-            s->nopt = 2; s->opt[0] = 0; s->opt[1] = 1;
-            ASK(D_CARD_OPTION, SH);
+            /* "You may either recruit two Nazgul ... or move any or all of the Nazgul": either, or neither */
+            s->nopt = 0; s->opt[s->nopt++] = 0; s->opt[s->nopt++] = 1; s->opt[s->nopt++] = 255;
+            s->qtag = Q_BCC_NAZGUL; ASK(D_CARD_OPTION, SH); s->qtag = Q_NONE;
             if (s->mv.a == 0) { recruit_naz(s, s->minion_loc[M_WK]); recruit_naz(s, s->minion_loc[M_WK]); f->v[3] = 1; }
+            else if (s->mv.a == 255) f->v[3] = 1;
         }
-        if (!f->v[3]) { s->comp_moved = 0; s->lock[0] = s->lock[1] = 0; CALL(push(s, FR_NAZMOVE)); }
+        if (!f->v[3]) { s->comp_moved = 0; s->lock[0] = s->lock[1] = 0; memset(s->naz_moved, 0, sizeof s->naz_moved); CALL(push(s, FR_NAZMOVE)); }
         s->lock[0] = s->lock[1] = 0;
         {
             Move tmp[MAXOPT];
             s->nopt = 0; s->opt[s->nopt++] = 0; s->opt[s->nopt++] = 1;
             if (attack_list(s, f->v[2], tmp)) s->opt[s->nopt++] = 2;
         }
+        s->qtag = Q_BCC_ARMY;           /* the BehindMedia referee's "skip" / "move" / "attack" (both cards) */
         ASK(D_CARD_OPTION, SH);
+        s->qtag = Q_NONE;
         if (s->mv.a == 1) {
             { Frame *g = push(s, FR_ARMY2); g->v[0] = SH; g->v[2] = f->v[2]; }
             CALL((void)0);
@@ -567,9 +587,11 @@ void fr_cardfx(State *s, Frame *f) {
                 CALL((void)0);
             }
         } else if (s->mv.a == 2) {
-            { Move tmp[MAXOPT]; int n = attack_list(s, f->v[2], tmp); s->nopt = 0; for (int i = 0; i < n; i++) s->opt[s->nopt++] = (uint8_t)i; }
-            CHOOSE(D_CARD_ARMY, SH);
-            { Move tmp[MAXOPT]; attack_list(s, f->v[2], tmp); Move m = tmp[s->mv.a]; push_battle(s, SH, m.a, m.b, m.c, m.d); }
+            /* the attack, as its target region (the Witch-king's Army attacks; asked as the BehindMedia referee's Choose attack) */
+            { Move tmp[MAXOPT]; int n = attack_list(s, f->v[2], tmp); s->nopt = 0;
+              for (int i = 0; i < n; i++) { int dup = 0; for (int j = 0; j < s->nopt; j++) dup |= s->opt[j] == tmp[i].b; if (!dup) s->opt[s->nopt++] = tmp[i].b; } }
+            s->qtag = Q_BCC_ATTACK; CHOOSE(D_CARD_ARMY, SH); s->qtag = Q_NONE;
+            { Move tmp[MAXOPT]; int n = attack_list(s, f->v[2], tmp), k = 0; while (k < n - 1 && tmp[k].b != s->mv.a) k++; Move m = tmp[k]; push_battle(s, SH, m.a, m.b, 10, 10); }
             CALL((void)0);
         }
     }
@@ -652,6 +674,32 @@ void fr_cardfx(State *s, Frame *f) {
             if ((DIST[r][R_NORTH_DUNLAND] == 1 || DIST[r][R_SOUTH_DUNLAND] == 1) && free_for_recruit(s, SH, r) && !s->siege[r]) s->opt[s->nopt++] = (uint8_t)r;
         CHOOSE(D_CARD_REGION, SH);
         if (s->mv.a != 255) { recruit(s, s->mv.a, ISENGARD, 0); recruit(s, s->mv.a, ISENGARD, 0); army_entered(s, SH, s->mv.a); }
+        /* "You may also move to this region up to four Isengard units (Regular or Elite) from North Dunland and/or
+           South Dunland": a Dunland region at a time, or neither (the BehindMedia referee's questions; Elites first here) */
+        if (s->mv.a != 255) {
+            f->v[1] = s->mv.a; f->v[2] = 0; f->v[3] = 0;          /* region, units moved, Dunland regions used */
+            for (;;) {
+                s->nopt = 0;
+                static const uint8_t DL[2] = { R_NORTH_DUNLAND, R_SOUTH_DUNLAND };
+                for (int i = 0; i < 2; i++) {
+                    int from = DL[i];
+                    if (f->v[2] >= 4 || (f->v[3] >> i) & 1 || from == f->v[1] || !units(s, SH, from) || !(s->reg[from][ISENGARD] + s->eli[from][ISENGARD])) continue;
+                    if (s->siege[from] && s->ctrl[from] == SH) continue;
+                    s->opt[s->nopt++] = (uint8_t)from;
+                }
+                if (!s->nopt) break;
+                s->opt[s->nopt++] = 255;
+                ASK(D_CARD_REGION, SH);
+                if (s->mv.a == 255) break;
+                {
+                    int from = s->mv.a, to = f->v[1], k = 4 - f->v[2];
+                    f->v[3] |= (uint8_t)(from == R_NORTH_DUNLAND ? 1 : 2);
+                    while (k > 0 && s->eli[from][ISENGARD]) { s->eli[from][ISENGARD]--; s->eli[to][ISENGARD]++; k--; f->v[2]++; }
+                    while (k > 0 && s->reg[from][ISENGARD]) { s->reg[from][ISENGARD]--; s->reg[to][ISENGARD]++; k--; f->v[2]++; }
+                    fix_siege(s, from);
+                }
+            }
+        }
     } else if (c == CARD_RETURN_OF_THE_WITCH_KING) {
         s->minion_loc[M_WK] = R_ANGMAR;
         if (free_for_recruit(s, SH, R_ANGMAR)) { recruit(s, R_ANGMAR, SAURON, 0); recruit(s, R_ANGMAR, SAURON, 0); recruit(s, R_ANGMAR, SAURON, 1); }

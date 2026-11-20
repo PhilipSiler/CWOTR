@@ -59,22 +59,40 @@ static void fsp_exposed(State *s) {   /* declared or revealed */
     if (s->card_where[CARD_THE_LAST_BATTLE] == W_TABLE) discard_card(s, CARD_THE_LAST_BATTLE);
 }
 
+/* The Fellowship phase as the rules have it (rulebook p. 17, 37, 43): the Free Peoples may declare the Fellowship,
+ * change the Guide (among the Companions of the highest Level) and enter Mordor, each once, in any order (no
+ * declaration after a change of Guide while Balrog of Moria is on the table: its tile depends on the Guide), until
+ * they end the phase. One question (D_FSP_DECLARE): 255 ends it, a region declares, 200 + c names Guide c, 199 enters
+ * Mordor. Frame vars: 0, 1 declaration scratch; 2 declared; 3 Guide changed. */
 void fr_fsp_phase(State *s, Frame *f) {
     CO_BEGIN
-    if (s->mordor < 0 && !s->revealed && (s->progress > 0 || (fp_haven(s, s->fsp_loc) && (s->corruption > 0 || !s->active[REGION[s->fsp_loc].nation])))) {
+    f->v[2] = f->v[3] = 0;
+    for (;;) {
         s->nopt = 0; s->opt[s->nopt++] = 255;
-        {
+        if (!f->v[2] && !s->revealed && s->mordor < 0 && !(f->v[3] && s->card_where[CARD_BALROG_OF_MORIA] == W_TABLE)) {
             int best = -1;      /* worth declaring: a haven (heal, rouse), a gate of Mordor, or the spot nearest to Mordor */
             for (int r = 0; r < NREG; r++) if (DIST[s->fsp_loc][r] <= s->progress && (best < 0 || mordor_dist(r) < mordor_dist(best))) best = r;
             for (int r = 0; r < NREG; r++) {
                 if (DIST[s->fsp_loc][r] > s->progress) continue;
                 if (wotr_prune && !(fp_haven(s, r) || r == R_MORANNON || r == R_MINAS_MORGUL || r == best)) continue;
+                if (wotr_prune && s->progress == 0 && !(fp_haven(s, r) && (s->corruption > 0 || !s->active[REGION[r].nation]))) continue;
                 s->opt[s->nopt++] = (uint8_t)r;
             }
         }
+        if (!f->v[3] && s->guide < NCOMP) {
+            int m = fsp_comps(s), best = 0;
+            for (int c = 0; c < NCOMP; c++) if ((m >> c) & 1 && comp_level(s, c) > best) best = comp_level(s, c);
+            for (int c = 0; c < NCOMP; c++) if ((m >> c) & 1 && comp_level(s, c) == best && c != s->guide) s->opt[s->nopt++] = (uint8_t)(FSP_GUIDE + c);
+        }
+        if (s->mordor < 0 && s->progress == 0 && (s->fsp_loc == R_MORANNON || s->fsp_loc == R_MINAS_MORGUL)) s->opt[s->nopt++] = FSP_MORDOR;
+        if (s->nopt == 1) break;
         ASK(D_FSP_DECLARE, FP);
-        if (s->mv.a != 255) {
+        if (s->mv.a == 255) break;
+        if (s->mv.a >= FSP_GUIDE) { s->guide = (uint8_t)(s->mv.a - FSP_GUIDE); f->v[3] = 1; continue; }
+        if (s->mv.a == FSP_MORDOR) { enter_mordor(s); continue; }
+        {
             int dst = s->mv.a;
+            f->v[2] = 1;
             f->v[0] = (uint8_t)(path_cost(s, s->fsp_loc, dst, s->progress) % 10);
             s->fsp_loc = (uint8_t)dst; s->progress = 0;
             fsp_exposed(s);
@@ -85,23 +103,15 @@ void fr_fsp_phase(State *s, Frame *f) {
                 if (s->card_where[CARD_WORN_WITH_SORROW_AND_TOIL] == W_TABLE) discard_card(s, CARD_WORN_WITH_SORROW_AND_TOIL);
                 if (s->card_where[CARD_FLOCKS_OF_CREBAIN] == W_TABLE) discard_card(s, CARD_FLOCKS_OF_CREBAIN);
             }
-            if (f->v[0] && s->card_where[CARD_BALROG_OF_MORIA] == W_TABLE) {
+        }
+        if (f->v[0] && s->card_where[CARD_BALROG_OF_MORIA] == W_TABLE) {
+            /* "You may discard" (the card's text): asked, as the BehindMedia referee does */
+            s->nopt = 2; s->opt[0] = 1; s->opt[1] = 255; s->qtag = Q_BALROG; ASK(D_CARD_OPTION, SH); s->qtag = Q_NONE;
+            if (s->mv.a == 1) {
                 discard_card(s, CARD_BALROG_OF_MORIA);
                 CALL(push_hunt(s, HM_CARD, HF_EYE_DISCARD | (f->v[1] ? HF_IGNORE_REVEAL : 0)));
             }
         }
-    }
-    {   /* guide */
-        int m = fsp_comps(s), best = 0;
-        s->nopt = 0;
-        for (int c = 0; c < NCOMP; c++) if ((m >> c) & 1 && comp_level(s, c) > best) best = comp_level(s, c);
-        for (int c = 0; c < NCOMP; c++) if ((m >> c) & 1 && comp_level(s, c) == best) s->opt[s->nopt++] = (uint8_t)c;
-    }
-    if (s->nopt > 1) { ASK(D_GUIDE, FP); s->guide = s->mv.a; }
-    if (s->mordor < 0 && s->progress == 0 && (s->fsp_loc == R_MORANNON || s->fsp_loc == R_MINAS_MORGUL)) {
-        s->nopt = 2; s->opt[0] = 0; s->opt[1] = 1;
-        ASK(D_ENTER_MORDOR, FP);
-        if (s->mv.a) enter_mordor(s);
     }
     CO_END
 }
@@ -130,23 +140,22 @@ void push_separate(State *s, int mask, int bonus, int siege_end, int fixed_level
     f->v[0] = (uint8_t)mask; f->v[1] = (uint8_t)bonus; f->v[2] = (uint8_t)siege_end; f->v[3] = (uint8_t)fixed_level;
 }
 
-static void worn_with_sorrow(State *s) {
-    if (s->card_where[CARD_WORN_WITH_SORROW_AND_TOIL] != W_TABLE) return;
-    static const uint8_t pri[] = {CARD_MITHRIL_COAT_AND_STING, CARD_WIZARDS_STAFF, CARD_AXE_AND_BOW, CARD_HORN_OF_GONDOR};
-    for (int i = 0; i < 4; i++) if (s->card_where[pri[i]] == W_TABLE) { discard_card(s, pri[i]); return; }
-    int cand[24], n = 0;
-    for (int c = 0; c < 24; c++) if (s->card_where[c] == W_HAND) cand[n++] = c;
-    if (n) discard_card(s, cand[rnd(s, (uint32_t)n)]);
-}
 
 /* frame vars: 0 mode, 1 flags, 2 successes, 3 tile, 4 damage, 5 stage, 6 reveal, 7 stop, 8 gollum-used */
 void fr_hunt(State *s, Frame *f) {
     CO_BEGIN
-    f->v[3] = 255; s->ret = 0;
+    f->v[3] = 255; s->ret = 0; s->hunt_drawn = 255;
     if (f->v[0] == HM_ROLL) {
-        int n = s->hunt_sh > 5 ? 5 : s->hunt_sh, bonus = s->hunt_fp, succ = 0, fails = 0, loc = s->fsp_loc;
+        if (!s->hunt_sh) break;
+        f->v[2] = 0;
+        if (s->card_where[CARD_FLOCKS_OF_CREBAIN] == W_TABLE) {     /* "you may discard" before the roll: asked */
+            s->nopt = 2; s->opt[0] = 1; s->opt[1] = 255; s->qtag = Q_FLOCKS; ASK(D_CARD_OPTION, SH); s->qtag = Q_NONE;
+            if (s->mv.a == 1) { discard_card(s, CARD_FLOCKS_OF_CREBAIN); f->v[2] = 1; }
+        }
+    }
+    if (f->v[0] == HM_ROLL) {
+        int n = s->hunt_sh > 5 ? 5 : s->hunt_sh, bonus = s->hunt_fp + f->v[2], succ = 0, fails = 0, loc = s->fsp_loc;
         if (!n) break;
-        if (n >= 2 && s->card_where[CARD_FLOCKS_OF_CREBAIN] == W_TABLE) { discard_card(s, CARD_FLOCKS_OF_CREBAIN); bonus++; }
         int thr = 6 - bonus; if (thr < 2) thr = 2;
         for (int i = 0; i < n; i++) { if (d6(s) >= thr) succ++; else fails++; }
         int rr = (REGION[loc].settle == S_STRONGHOLD && s->ctrl[loc] == SH) + (units(s, SH, loc) > 0)
@@ -172,13 +181,13 @@ void fr_hunt(State *s, Frame *f) {
         if (s->mv.a) {
             discard_card(s, CARD_MITHRIL_COAT_AND_STING);
             int t = f->v[3], t2;
-            if (t < NSTD_TILE) s->tile_out[t]--;        /* first tile is held aside, then goes back to the pool */
+            if (t < NSTD_TILE) s->tile_out[t]--;        /* the first tile is held aside until this Hunt ends (Card Almanac p. 11) */
             t2 = draw_tile(s);
-            s->tile_pool[t]++;
-            if (t2 >= 0) f->v[3] = (uint8_t)t2;
-            else { s->tile_pool[t]--; if (t < NSTD_TILE) s->tile_out[t]++; }
+            if (t2 >= 0) { f->v[3] = (uint8_t)t2; s->mithril_tile = (uint8_t)(t + 1); s->mithril_frame = (uint8_t)(f - s->st); }
+            else if (t < NSTD_TILE) s->tile_out[t]++;
         }
     }
+    if (f->v[1] & HF_DRAW_ONLY) { s->hunt_drawn = f->v[3]; break; }
     {
         int t = f->v[3], dmg = TILE_VAL[t];
         if ((f->v[1] & HF_EYE_DISCARD) && (TILE_IS_EYE(t) || TILE_FP_SPECIAL(t))) break;
@@ -225,9 +234,24 @@ void fr_hunt(State *s, Frame *f) {
             lvl = comp_level(s, c);
             f->v[5] = 3;
             f->v[4] = (uint8_t)(f->v[4] > lvl ? f->v[4] - lvl : 0);
-            worn_with_sorrow(s);
             if (c >= C_MERRY && s->mordor < 0) CALL(push_separate(s, 1 << c, 0, 0, 0));
             else kill_comp(s, c);
+            /* Worn with Sorrow and Toil: the Shadow may discard a random Free Peoples Character card from the hand or
+               one from the table, or nothing (card text; Card Almanac p. 26) */
+            if (s->card_where[CARD_WORN_WITH_SORROW_AND_TOIL] == W_TABLE && !s->winner) {
+                s->nopt = 0;
+                for (int k = 0; k < 24; k++) if (s->card_where[k] == W_HAND) { s->opt[s->nopt++] = Q_HAND; break; }
+                for (int k = 0; k < 24; k++) if (s->card_where[k] == W_TABLE) s->opt[s->nopt++] = (uint8_t)k;
+                if (s->nopt) {
+                    s->opt[s->nopt++] = 255;
+                    s->qtag = Q_WORN_WITH_SORROW; ASK(D_CARD_OPTION, SH); s->qtag = Q_NONE;
+                    if (s->mv.a == Q_HAND) {
+                        int cand[24], n = 0;
+                        for (int k = 0; k < 24; k++) if (s->card_where[k] == W_HAND) cand[n++] = k;
+                        if (n) discard_card(s, cand[rnd(s, (uint32_t)n)]);
+                    } else if (s->mv.a < 24) discard_card(s, s->mv.a);
+                }
+            }
         }
     }
     if (s->winner) return;
@@ -236,7 +260,10 @@ void fr_hunt(State *s, Frame *f) {
         else if (!s->revealed) CALL(push_reveal(s));
     }
     s->ret = f->v[7];
-    CO_END
+    }
+    /* Mithril Coat and Sting: the first tile goes back to the pool when its Hunt is over */
+    if (s->mithril_tile && s->mithril_frame == (uint8_t)(f - s->st)) { s->tile_pool[s->mithril_tile - 1]++; s->mithril_tile = 0; }
+    pop(s); return;
 }
 
 void fr_reveal(State *s, Frame *f) {
@@ -274,8 +301,11 @@ void fr_reveal(State *s, Frame *f) {
         f->v[0] = (uint8_t)(cost / 10); f->v[1] = (uint8_t)(cost % 10);
     }
     if (f->v[1] && s->card_where[CARD_BALROG_OF_MORIA] == W_TABLE) {
-        discard_card(s, CARD_BALROG_OF_MORIA);
-        CALL(push_hunt(s, HM_CARD, HF_EYE_DISCARD));
+        s->nopt = 2; s->opt[0] = 1; s->opt[1] = 255; s->qtag = Q_BALROG; ASK(D_CARD_OPTION, SH); s->qtag = Q_NONE;
+        if (s->mv.a == 1) {
+            discard_card(s, CARD_BALROG_OF_MORIA);
+            CALL(push_hunt(s, HM_CARD, HF_EYE_DISCARD));
+        }
     }
     while (f->v[0] > 0 && !s->winner) { f->v[0]--; CALL(push_hunt(s, HM_STRONGHOLD, 0)); }
     CO_END

@@ -49,7 +49,7 @@ static void test_setup(void) {
     static const int R0[NNAT] = {3, 3, 9, 4, 4, 6, 28, 14}, E0[NNAT] = {2, 6, 1, 1, 1, 1, 2, 3};
     for (int n = 0; n < NNAT; n++) CHECK(ureg[n] == R0[n] && ueli[n] == E0[n], "nation %d on board %dR %dE, want %dR %dE", n, ureg[n], ueli[n], R0[n], E0[n]);
     CHECK(ldr == 8 && naz == 4, "leaders %d nazgul %d", ldr, naz);
-    CHECK(s.dkind == D_GUIDE && s.dplayer == FP, "first decision should be the guide choice (Gandalf/Strider tie), got %s", wotr_dkind_name(s.dkind));
+    CHECK(s.dkind == D_FSP_DECLARE && s.dplayer == FP && has_choice(&s, FSP_GUIDE + C_STRIDER), "first decision should be the Fellowship phase with the guide choice (Gandalf/Strider tie), got %s", wotr_dkind_name(s.dkind));
     CHECK(s.hand_n[FP] == 2 && s.hand_n[SH] == 2, "opening hands %d %d", s.hand_n[FP], s.hand_n[SH]);
     CHECK(wotr_vp(&s, FP) == 0 && wotr_vp(&s, SH) == 0, "vp");
     int sh_vp_total = 0, fp_vp_total = 0;
@@ -124,9 +124,9 @@ static void test_fellowship(void) {
     /* Mordor: needs to stand at Morannon/Minas Morgul in the fellowship phase */
     fresh(&t, 6); t.fsp_loc = R_MORANNON; t.progress = 0; set_dice(&t, FP, 0, 0, 1, 0, 0, 0); set_dice(&t, SH, 0, 0, 0, 0, 0, 0);
     find(&t, M_SKIP, -1, -1, &sk); wotr_apply(&t, sk);
-    while (t.dkind != D_ENTER_MORDOR && !t.winner && t.turn < 3) { wotr_moves(&t, mv); wotr_apply(&t, mv[0]); }
-    CHECK(t.dkind == D_ENTER_MORDOR, "offered to enter Mordor");
-    wotr_apply(&t, choice(1));
+    while (!(t.dkind == D_FSP_DECLARE && has_choice(&t, FSP_MORDOR)) && !t.winner && t.turn < 3) { wotr_moves(&t, mv); wotr_apply(&t, mv[0]); }
+    CHECK(t.dkind == D_FSP_DECLARE && has_choice(&t, FSP_MORDOR), "offered to enter Mordor");
+    wotr_apply(&t, choice(FSP_MORDOR));
     CHECK(t.mordor == 0, "on the Mordor track");
     to_action(&t);
     /* no move this turn => +1 corruption at end of turn */
@@ -433,8 +433,8 @@ static void test_dice_and_cards(void) {
     set_dice(&s, FP, 0, 0, 1, 0, 0, 0); set_dice(&s, SH, 0, 0, 0, 0, 0, 0);
     while (s.dkind != D_ACTION || s.dplayer != FP) { wotr_moves(&s, mv); wotr_apply(&s, mv[0]); }
     find(&s, M_SKIP, -1, -1, &m); wotr_apply(&s, m);
-    while (s.dkind != D_ENTER_MORDOR && s.turn < 4) { wotr_moves(&s, mv); wotr_apply(&s, mv[0]); }
-    wotr_apply(&s, choice(1));
+    while (!(s.dkind == D_FSP_DECLARE && has_choice(&s, FSP_MORDOR)) && s.turn < 4) { wotr_moves(&s, mv); wotr_apply(&s, mv[0]); }
+    wotr_apply(&s, choice(FSP_MORDOR));
     CHECK(s.tile_pool[T_EYE] == 4 && s.tile_pool[T_CLOAKS] == 1, "Mordor pool: eyes %d cloaks %d", s.tile_pool[T_EYE], s.tile_pool[T_CLOAKS]);
     /* A Power too Great protects Lorien */
     fresh(&s, 45); shadow_to_act(&s);
