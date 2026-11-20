@@ -64,6 +64,10 @@ static int g_teach[3]; static float g_teach_share = 0, g_teach_part = 1; static 
    from the round they were switched on (kept in <dir>/spec_start). Files: <player>.s<family><f|s>. */
 static int g_spec = 0; static float g_spec_fade = 480;
 static float g_soon = 0, g_soon_fade = 1, g_ringwin = 1, g_corrwin = 1;
+/* WOTR_OUT_FP="ring,military,lost to corruption,lost to conquest" and WOTR_OUT_SH="conquest,corruption,lost to the Ring,
+   lost to a military victory" (Philip, 2026-11-20): what each way of ending is worth to that side's own network, 0..1
+   (plain: 1,1,0,0). Each side has its own network, so the two tables need not mirror each other. */
+static float g_out[2][4] = {{1, 1, 0, 0}, {1, 1, 0, 0}}; static int g_out_on;
 static float g_speed[3] = {0, 8, 0.5f};
 static float g_rfirst[4] = {-1, 8, 0.3f, 0.6f};
 static float g_rteach[5] = {0, 12, 0.25f, 0.5f, SH};
@@ -422,6 +426,12 @@ static void play_game(Job *j, uint64_t seed) {
         float late = s.win_type == WIN_SH_MIL ? g_soon * (float)(s.turn - 8) : 0.2f;
         z = g_soon_fade * (late < 0 ? 0 : late > 0.2f ? 0.2f : late);
     }
+    float zs[2] = {z, z};                       /* the result as each side's own network is taught it (FP's view) */
+    if (g_out_on && s.win_type != WIN_NONE) {
+        int w = s.win_type;
+        zs[FP] = g_out[FP][w == WIN_RING ? 0 : w == WIN_FP_MIL ? 1 : w == WIN_CORRUPTION ? 2 : 3];
+        zs[SH] = 1 - g_out[SH][w == WIN_SH_MIL ? 0 : w == WIN_CORRUPTION ? 1 : w == WIN_RING ? 2 : 3];
+    }
     if (j->arena) {
         float G = z, tgt[NOUT];
         int left_end = fsp_steps_to_mordor(&s) + (s.mordor < 0 ? 5 : 5 - s.mordor), tiles_fp = 0, tiles_sh = 0, fpwar = 0, dead = 0;
@@ -462,12 +472,12 @@ static void play_game(Job *j, uint64_t seed) {
            the result. l = 1 is the plain result (as without the switch); smaller l trusts the next estimate more. */
         static _Thread_local float lam_at[MAXREC];
         if (g_lambda > 0) {      /* the next estimate is taken from the SAME side's next decision (the other side may be a different, frozen player) */
-            float g[2] = {z, z}, nx[2] = {-1, -1};
+            float g[2] = {zs[0], zs[1]}, nx[2] = {-1, -1};
             for (int t = T - 1; t >= 0; t--) { int k = nets[t] & 1; if (nx[k] >= 0) g[k] = (1 - g_lambda) * nx[k] + g_lambda * g[k]; lam_at[t] = g[k]; nx[k] = sv_at[t]; }
         }
         for (int t = T - 1; t >= 0; t--) {
             if (!keep[t]) continue;
-            G = z + shaped[t]; G = G < 0 ? 0 : G > 1 ? 1 : G;
+            G = zs[nets[t] & 1] + shaped[t]; G = G < 0 ? 0 : G > 1 ? 1 : G;
             if (g_lambda > 0) G = lam_at[t];
             if (rt_at[t] >= 0) G = (1 - g_rteach[3]) * G + g_rteach[3] * rt_at[t];
             else if (dv_at[t] >= 0) G = (1 - g_teach_share) * G + g_teach_share * dv_at[t];
@@ -912,6 +922,9 @@ static int cmd_train(int argc, char **argv) {
     if (getenv("WOTR_SPEED")) sscanf(getenv("WOTR_SPEED"), "%f,%f,%f", &g_speed[0], &g_speed[1], &g_speed[2]);
     if (getenv("WOTR_STYLE")) sscanf(getenv("WOTR_STYLE"), "%f,%f", &g_style, &g_style_s);
     if (getenv("WOTR_CORRWIN")) g_corrwin = (float)atof(getenv("WOTR_CORRWIN"));
+    if (getenv("WOTR_OUT_FP")) g_out_on |= sscanf(getenv("WOTR_OUT_FP"), "%f,%f,%f,%f", &g_out[FP][0], &g_out[FP][1], &g_out[FP][2], &g_out[FP][3]) == 4;
+    if (getenv("WOTR_OUT_SH")) g_out_on |= sscanf(getenv("WOTR_OUT_SH"), "%f,%f,%f,%f", &g_out[SH][0], &g_out[SH][1], &g_out[SH][2], &g_out[SH][3]) == 4;
+    if (g_out_on) printf("outcome values: Free Peoples ring %.2f military %.2f lost to corruption %.2f lost to conquest %.2f | Shadow conquest %.2f corruption %.2f lost to the Ring %.2f lost to a military victory %.2f\n", g_out[FP][0], g_out[FP][1], g_out[FP][2], g_out[FP][3], g_out[SH][0], g_out[SH][1], g_out[SH][2], g_out[SH][3]);
     if (getenv("WOTR_RINGWIN")) g_ringwin = (float)atof(getenv("WOTR_RINGWIN"));
     if (getenv("WOTR_AWLES_SH")) awles_load(SH, getenv("WOTR_AWLES_SH"));
     if (getenv("WOTR_AWLES_FP")) awles_load(FP, getenv("WOTR_AWLES_FP"));
