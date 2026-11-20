@@ -184,7 +184,7 @@ void fr_card(State *s, Frame *f) {
         }
         if (!s->rng_max && CARD_SIDE(f->v[0]) == SH && ON_TABLE(CARD_THE_PALANTIR_OF_ORTHANC) && f->v[0] != CARD_THE_PALANTIR_OF_ORTHANC) {
             s->nopt = 2; s->opt[0] = 0; s->opt[1] = 1;          /* either deck */
-            ASK(D_CARD_OPTION, SH);
+            s->qtag = Q_DRAW_DECK; ASK(D_CARD_OPTION, SH); s->qtag = Q_NONE;
             draw_card(s, 2 + s->mv.a);
             if (s->hand_n[SH] > 6) CALL(push(s, FR_DISCARD)->v[0] = SH);
         }

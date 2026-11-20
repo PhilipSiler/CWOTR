@@ -718,7 +718,8 @@ static Leaf *leaf_new(Leaf *L, int *n, Move m) {
  * a card's question: "answer" plus its typed field (a character), a Leader as "LEADER:<nation>", "skip". */
 static void qtag_step(Leaf *L, const State *s, int a) {
     int side = s->qtag == Q_WORDS_OF_POWER || s->qtag == Q_BLACK_BREATH ? SH : FP;
-    if (s->qtag == Q_NAZGUL_STRIKE || s->qtag == Q_BCC_NAZGUL || s->qtag == Q_BCC_ARMY || s->qtag == Q_BCC_ATTACK || s->qtag == Q_FLOCKS || s->qtag == Q_BALROG) side = SH;
+    if (s->qtag == Q_NAZGUL_STRIKE || s->qtag == Q_BCC_NAZGUL || s->qtag == Q_BCC_ARMY || s->qtag == Q_BCC_ATTACK || s->qtag == Q_FLOCKS || s->qtag == Q_BALROG || s->qtag == Q_DRAW_DECK) side = SH;
+    if (s->qtag == Q_DRAW_DECK) { step(L, K_CARD_CHOICE, "\"kind\":\"draw\",\"deck\":\"%s\"}", a ? "strategy" : "character"); return; }
     if (s->qtag == Q_WHITE_RIDER) { step(L, K_WHITE_RIDER, "\"kind\":\"%s\"}", a == 1 ? "use" : "skip"); return; }
     if (s->qtag == Q_FLOCKS || s->qtag == Q_BALROG) {      /* "Discard ...?": the BehindMedia referee's "yes" / "skip" */
         step(L, K_CARD_CHOICE, "\"kind\":\"card_choice\",\"card\":\"%s\",\"answer\":\"%s\"%s}", CARD_KEY[s->qtag == Q_FLOCKS ? CARD_FLOCKS_OF_CREBAIN : CARD_BALROG_OF_MORIA],

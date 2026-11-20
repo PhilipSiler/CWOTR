@@ -52,7 +52,7 @@ enum {
     D_CARD_REGION, D_CARD_OPTION, D_CARD_NATION, D_CARD_CARD, D_CARD_COMP, D_CARD_ARMY, ND
 };
 /* the questions of D_CARD_OPTION added to ask what the official texts leave to a player (State.qtag) */
-enum { Q_NONE, Q_WORDS_OF_POWER, Q_BLADE, Q_FATEFUL_STRIKE, Q_HEROIC_DEATH, Q_BLACK_BREATH, Q_WORN_WITH_SORROW, Q_NAZGUL_STRIKE, Q_BCC_NAZGUL, Q_BCC_ARMY, Q_BCC_ATTACK, Q_LURE, Q_EXCESS, Q_FLOCKS, Q_BALROG, Q_WHITE_RIDER };
+enum { Q_NONE, Q_WORDS_OF_POWER, Q_BLADE, Q_FATEFUL_STRIKE, Q_HEROIC_DEATH, Q_BLACK_BREATH, Q_WORN_WITH_SORROW, Q_NAZGUL_STRIKE, Q_BCC_NAZGUL, Q_BCC_ARMY, Q_BCC_ATTACK, Q_LURE, Q_EXCESS, Q_FLOCKS, Q_BALROG, Q_WHITE_RIDER, Q_DRAW_DECK };
 /* D_FSP_DECLARE: one question for the whole Fellowship phase, in any order (RB p. 16): 255 ends it, a region declares
    the Fellowship there, FSP_GUIDE + c makes Companion c the Guide, FSP_MORDOR enters Mordor */
 #define FSP_GUIDE 200
