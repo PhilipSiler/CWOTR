@@ -21,7 +21,7 @@
 /* WOTR_RECORD="<SH|FP>,<file prefix>": in readings (eval), write that side's action decisions as lesson records (the true
    State, then the Move played: what WOTR_AWLES_* reads), one file per thread <prefix>.<thread>. For keeping a strong
    player's own look-ahead choices in a later run's fit of the move suggester (2026-11-21). */
-static const char *g_rec; static int g_rec_side;
+static const char *g_rec; static int g_rec_side, g_rec_all;      /* WOTR_RECORD_ALL=1: every decision with a choice, not only action decisions (battles, Hunt, cards...) */
 static const char *g_falls;        /* WOTR_FALLS=<file prefix>: dump settlement pictures and what became of them, for fitting the fall forecast on our own games */
 static float g_floor = 0.0f;       /* WOTR_FLOOR=<x>: the strategy formula's share never falls below this (below about 0.3 Shadow's conquest play slid in every run so far) */
 /* Starting positions from human games (WOTR_STARTS=<file written by tools/humanlogs/starts.py>, WOTR_START_SHARE=<x>):
@@ -298,7 +298,7 @@ static void play_game(Job *j, uint64_t seed) {
         if (dopen) { A->depth = 3; A->width = 4; A->replies = 1; A->narrow = 6; A->deep_gap = g_dgap; taught = 1; }
         long ev0 = A->evals;
         Move m = agent_choose(A, &s, &bv, &n);
-        if (g_rec && !j->arena && n > 1 && s.dkind == D_ACTION && s.dplayer == g_rec_side) {
+        if (g_rec && !j->arena && n > 1 && (s.dkind == D_ACTION || g_rec_all) && s.dplayer == g_rec_side) {
             static _Thread_local FILE *rf;
             if (!rf) { char fp[600]; snprintf(fp, sizeof fp, "%s.%p", g_rec, (void *)&rf); rf = fopen(fp, "wb"); }
             if (rf) { fwrite(&s, sizeof(State), 1, rf); fwrite(&m, sizeof(Move), 1, rf); }
@@ -1497,6 +1497,7 @@ static int cmd_awlearn(int argc, char **argv) {
 
 /* WOTR_REW is read for every command, so that readings (eval) are played with the same values the players were trained with */
 static void rew_init(void) {
+    g_rec_all = getenv("WOTR_RECORD_ALL") && atoi(getenv("WOTR_RECORD_ALL"));
     if (getenv("WOTR_STALL")) agent_stall = (float)atof(getenv("WOTR_STALL"));
     if (getenv("WOTR_RECORD") && strlen(getenv("WOTR_RECORD")) > 3) { g_rec_side = getenv("WOTR_RECORD")[0] == 'F' ? FP : SH; g_rec = getenv("WOTR_RECORD") + 3; }
     if (getenv("WOTR_REW")) {

@@ -587,7 +587,10 @@ static Move agent_choose_(Agent *a, const State *s, float *best_v, int *n_moves)
             if ((v = getenv("WOTR_HUMAN_EARLY_FP"))) sscanf(v, "%f,%d", &hum_early_fp, &hum_early_fp_turns);   /* the same for the Free Peoples */   /* Shadow's lean is <w> instead on turns up to <turns> */
             read = 1; }
     }
-    if (agent_hum[pov] > 0 && s->dkind == D_ACTION && a->dpol[pov] && !set) {
+    /* WOTR_LEAN_ALL=1 (2026-11-21): the lean acts at every kind of decision, not only at action decisions - so that lessons
+       recorded at battle decisions (go inside the walls, do not walk out...) can carry those written rules as well */
+    static int lean_all = -1; if (lean_all < 0) { const char *v = getenv("WOTR_LEAN_ALL"); lean_all = v && atoi(v); }
+    if (agent_hum[pov] > 0 && (s->dkind == D_ACTION || lean_all) && a->dpol[pov] && !set) {
         float h[H1], mx = -1e30f, z = 0;
         for (int j = 0; j < H1; j++) h[j] = a->acc[pov][j] > 0 ? a->acc[pov][j] : 0;
         pol_logits(a->dpol[pov], h, s->dkind, mv, n, hum);
