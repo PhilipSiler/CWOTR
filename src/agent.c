@@ -513,7 +513,15 @@ static int gumbel_choose(Agent *a, const State *det, const Move *mv, int n, int 
     return idx[alive[0]];
 }
 
+float agent_out[2][4] = {{1, 1, 0, 0}, {1, 1, 0, 0}}; int agent_out_on; _Thread_local int agent_pov;
+static Move agent_choose_(Agent *a, const State *s, float *best_v, int *n_moves);
 Move agent_choose(Agent *a, const State *s, float *best_v, int *n_moves) {
+    int was = agent_pov; agent_pov = s->dplayer;
+    Move m = agent_choose_(a, s, best_v, n_moves);
+    agent_pov = was;
+    return m;
+}
+static Move agent_choose_(Agent *a, const State *s, float *best_v, int *n_moves) {
     Move *mv = a->last_mv; float *val = a->last_val;
     int n = wotr_moves(s, mv), pov = s->dplayer;
     if (n_moves) *n_moves = n;

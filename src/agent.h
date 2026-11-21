@@ -52,7 +52,21 @@ int   spec_group(int dkind);                                       /* SP_... or 
 float agent_value(Agent *a, const State *s);                       /* log-odds that FP wins (+-WIN_LOGIT at game end) */
 #define WIN_LOGIT 30.0f
 /* log-odds of a finished game: a game stopped by the turn cap is a draw, so nobody can win by waiting */
-static inline float terminal_value(const State *s) { return s->win_type == WIN_NONE ? 0.0f : s->winner == 1 ? WIN_LOGIT : -WIN_LOGIT; }
+/* Outcome values per side (train.c: WOTR_OUT_FP / WOTR_OUT_SH), as the side now choosing (agent_pov) counts them: the
+   same numbers its network is taught, so the last step to a win of a kind is worth what that kind is worth. Off: +-WIN_LOGIT. */
+extern float agent_out[2][4]; extern int agent_out_on; extern _Thread_local int agent_pov;
+static inline float terminal_value(const State *s) {
+    if (s->win_type == WIN_NONE) return 0.0f;
+    if (agent_out_on) {
+        int w = s->win_type;
+        float v = agent_pov == FP ? agent_out[FP][w == WIN_RING ? 0 : w == WIN_FP_MIL ? 1 : w == WIN_CORRUPTION ? 2 : 3]
+                                  : 1 - agent_out[SH][w == WIN_SH_MIL ? 0 : w == WIN_CORRUPTION ? 1 : w == WIN_RING ? 2 : 3];
+        if (v >= 1) return WIN_LOGIT;
+        if (v <= 0) return -WIN_LOGIT;
+        return logf(v / (1 - v));
+    }
+    return s->winner == 1 ? WIN_LOGIT : -WIN_LOGIT;
+}
 /* picks a move for s->dplayer; *best_v = search value (log-odds that FP wins) of the best move; last_val[] likewise */
 Move  agent_choose(Agent *a, const State *s, float *best_v, int *n_moves);
 extern long agent_roll_count, agent_roll_decisions; extern double agent_roll_ms_max, agent_roll_ms_sum;

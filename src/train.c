@@ -924,6 +924,7 @@ static int cmd_train(int argc, char **argv) {
     if (getenv("WOTR_CORRWIN")) g_corrwin = (float)atof(getenv("WOTR_CORRWIN"));
     if (getenv("WOTR_OUT_FP")) g_out_on |= sscanf(getenv("WOTR_OUT_FP"), "%f,%f,%f,%f", &g_out[FP][0], &g_out[FP][1], &g_out[FP][2], &g_out[FP][3]) == 4;
     if (getenv("WOTR_OUT_SH")) g_out_on |= sscanf(getenv("WOTR_OUT_SH"), "%f,%f,%f,%f", &g_out[SH][0], &g_out[SH][1], &g_out[SH][2], &g_out[SH][3]) == 4;
+    if (g_out_on) { memcpy(agent_out, g_out, sizeof g_out); agent_out_on = 1; }
     if (g_out_on) printf("outcome values: Free Peoples ring %.2f military %.2f lost to corruption %.2f lost to conquest %.2f | Shadow conquest %.2f corruption %.2f lost to the Ring %.2f lost to a military victory %.2f\n", g_out[FP][0], g_out[FP][1], g_out[FP][2], g_out[FP][3], g_out[SH][0], g_out[SH][1], g_out[SH][2], g_out[SH][3]);
     if (getenv("WOTR_RINGWIN")) g_ringwin = (float)atof(getenv("WOTR_RINGWIN"));
     if (getenv("WOTR_AWLES_SH")) awles_load(SH, getenv("WOTR_AWLES_SH"));
