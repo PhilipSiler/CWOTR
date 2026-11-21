@@ -151,7 +151,14 @@ static _Thread_local int g_imagined;
    instead (0.3 = as they were at the share every player so far was trained with): fading the formula and taking off
    the nudges are then two separate steps. (At share 0 with the nudges gone too, Shadow lost 4 games in 10 to raids
    on its strongholds.) */
-static float nudge_share(float al) { static float x = -2; if (x < -1) { const char *v = getenv("WOTR_NUDGE"); x = v ? (float)atof(v) : -1; } return x >= 0 ? x : al; }
+/* WOTR_NUDGE=<x> fixes the written move rules' strength for both sides; WOTR_NUDGE_FP / WOTR_NUDGE_SH (2026-11-21) set it
+   for the side now choosing (agent_pov), so that a reading can pit a player without rules against one with them. */
+static float nudge_share(float al) {
+    static float x = -2, xs[2];
+    if (x < -1) { const char *v = getenv("WOTR_NUDGE"); x = v ? (float)atof(v) : -1; xs[FP] = xs[SH] = -1; if ((v = getenv("WOTR_NUDGE_FP"))) xs[FP] = (float)atof(v); if ((v = getenv("WOTR_NUDGE_SH"))) xs[SH] = (float)atof(v); }
+    if (xs[agent_pov & 1] >= 0) return xs[agent_pov & 1];
+    return x >= 0 ? x : al;
+}
 /* what an own city or stronghold with a Free Peoples army beside it is worth guarding, when `left` Shadow units would
    stand in it (0: not one, not threatened, or held well enough). Held well enough: at least one unit - or, with
    WOTR_HOME_THIN=1 (2026-11-20), at least as many units as the largest such Free Peoples army, five at most (what fits
@@ -589,8 +596,8 @@ static Move agent_choose_(Agent *a, const State *s, float *best_v, int *n_moves)
     }
     /* WOTR_LEAN_ALL=1 (2026-11-21): the lean acts at every kind of decision, not only at action decisions - so that lessons
        recorded at battle decisions (go inside the walls, do not walk out...) can carry those written rules as well */
-    static int lean_all = -1; if (lean_all < 0) { const char *v = getenv("WOTR_LEAN_ALL"); lean_all = v && atoi(v); }
-    if (agent_hum[pov] > 0 && (s->dkind == D_ACTION || lean_all) && a->dpol[pov] && !set) {
+    static int lean_all = -1, lean_side[2]; if (lean_all < 0) { const char *v = getenv("WOTR_LEAN_ALL"); lean_all = v && atoi(v); lean_side[FP] = lean_side[SH] = lean_all; if ((v = getenv("WOTR_LEAN_ALL_FP"))) lean_side[FP] = atoi(v); if ((v = getenv("WOTR_LEAN_ALL_SH"))) lean_side[SH] = atoi(v); }      /* per side: WOTR_LEAN_ALL_FP / _SH */
+    if (agent_hum[pov] > 0 && (s->dkind == D_ACTION || lean_side[pov]) && a->dpol[pov] && !set) {
         float h[H1], mx = -1e30f, z = 0;
         for (int j = 0; j < H1; j++) h[j] = a->acc[pov][j] > 0 ? a->acc[pov][j] : 0;
         pol_logits(a->dpol[pov], h, s->dkind, mv, n, hum);
