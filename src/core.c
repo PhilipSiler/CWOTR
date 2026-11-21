@@ -246,10 +246,10 @@ void wipe_leaders(State *s, int side, int r, int kill_chars) {
     }
 }
 int recruit(State *s, int r, int n, int elite) {
-    int side = NAT_SIDE(n);
-    if (units(s, side, r) >= ((s->siege[r] && s->ctrl[r] == side) ? 5 : 10)) return 0;
+    /* recruitment may exceed the stacking limit: the owner removes the excess at the end of the action (RB p. 26-27) */
     if (elite) { if (!s->pool_eli[n]) return 0; s->pool_eli[n]--; s->eli[r][n]++; }
     else { if (!s->pool_reg[n]) return 0; s->pool_reg[n]--; s->reg[r][n]++; }
+    if (s->rec_n < 8) { s->rec_r[s->rec_n] = (uint8_t)r; s->rec_nat[s->rec_n] = (uint8_t)n; s->rec_eli[s->rec_n++] = (uint8_t)elite; }
     return 1;
 }
 int recruit_leader(State *s, int r, int n) {
@@ -300,7 +300,7 @@ int draw_card(State *s, int deck) {
     int cand[24], n = 0;
     for (int c = deck * 24; c < deck * 24 + 24; c++) if (s->card_where[c] == W_DECK) cand[n++] = c;
     if (!n) return -1;
-    int c = cand[rnd(s, (uint32_t)n)];
+    wotr_draw_deck = deck; int c = cand[rndk(s, (uint32_t)n, 4)];
     s->card_where[c] = W_HAND; s->hand_n[CARD_SIDE(c)]++;
     if (s->rng_max == 1) s->rng_max = 3;        /* card_has_effect: a draw within the turn being tried */
     return c;
@@ -374,6 +374,8 @@ void move_army(State *s, int side, int src, int dst, int nr, int ne, int leaders
 }
 
 void relocate_army(State *s, int side, int from, int to) {
+    s->reloc_on = 1; s->reloc_from = (uint8_t)from; s->reloc_to = (uint8_t)to; s->reloc_naz = side == SH ? s->naz[from] : 0;
+    for (int n = 0; n < NNAT; n++) { s->reloc_reg[n] = NAT_SIDE(n) == side ? s->reg[from][n] : 0; s->reloc_eli[n] = NAT_SIDE(n) == side ? s->eli[from][n] : 0; if (n < NFPNAT) s->reloc_ldr[n] = side == FP ? s->ldr[from][n] : 0; }
     for (int n = 0; n < NNAT; n++) {
         if (NAT_SIDE(n) != side) continue;
         s->reg[to][n] += s->reg[from][n]; s->reg[from][n] = 0;

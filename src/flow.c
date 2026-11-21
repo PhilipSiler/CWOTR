@@ -1,7 +1,7 @@
 /* flow.c -- turn structure, action dice, and the simple action chains */
 #include "wotr.h"
 
-#define MAX_TURNS 30
+#define MAX_TURNS 200     /* no turn cap in the rules: the referee ends a game at its own (was 30, as a Shadow win) */
 
 static int ndice(const State *s, int side) { int n = 0; for (int f = 0; f < NFACE; f++) n += s->dice[side][f]; return n; }
 static int pool_size(const State *s, int side) {
@@ -49,9 +49,9 @@ void fr_game(State *s, Frame *f) {
         ASK(D_HUNT_ALLOC, SH);
         s->hunt_sh = s->mv.a;
         /* 4: action roll */
-        for (int i = pool_size(s, FP); i > 0; i--) s->dice[FP][FPF[rnd(s, 6)]]++;
+        for (int i = pool_size(s, FP); i > 0; i--) s->dice[FP][FPF[rndk(s, 6, 1)]]++;
         for (int i = pool_size(s, SH) - s->hunt_sh; i > 0; i--) {
-            int face = SHF[rnd(s, 6)];
+            int face = SHF[rndk(s, 6, 2)];
             if (face == F_SPECIAL) s->hunt_sh++; else s->dice[SH][face]++;
         }
         /* 5: action resolution */
@@ -79,13 +79,13 @@ static void do_muster(State *s, int side, int r, int leader) {
 }
 
 void do_naz_move(State *s, Move m) {
-    if (m.d == 0) { s->naz[m.a] -= m.c; s->naz[m.b] += m.c; s->lock[m.b >> 6] |= 1ULL << (m.b & 63); }
+    if (m.d == 0) { s->naz[m.a] -= m.c; s->naz[m.b] += m.c; s->naz_moved[m.b] += m.c; }   /* (the region is not locked: Nazgul there that have not moved may still go) */
     else { s->minion_loc[m.d == 1 ? M_WK : M_MOUTH] = m.b; s->comp_moved |= (uint8_t)(1 << (m.d - 1)); }
 }
 
 static void do_action(State *s, int side) {
     Move m = s->mv;
-    s->lock[0] = s->lock[1] = 0; s->comp_moved = 0;
+    s->lock[0] = s->lock[1] = 0; s->comp_moved = 0; memset(s->naz_moved, 0, sizeof s->naz_moved);
     if (m.type != M_PASS) use_die(s, side, m.die);
     switch (m.type) {
     case M_PASS: case M_SKIP: break;
@@ -98,7 +98,8 @@ static void do_action(State *s, int side) {
         if (m.f) { Frame *f = push(s, FR_ARMY2); f->v[0] = (uint8_t)side; f->v[3] = (uint8_t)(m.a + 1); }
         break;
     case M_ATTACK: push_battle(s, side, m.a, m.b, m.c, m.d); break;
-    case M_PLAY: push_card(s, m.a, (m.die & 0x7F) == F_EVENT); break;
+    /* a Will of the West result may become an Event result first (rulebook p. 21): Gandalf the Grey's draw too */
+    case M_PLAY: push_card(s, m.a, (m.die & 0x7F) == F_EVENT || (side == FP && (m.die & 0x7F) == F_SPECIAL)); break;
     case M_DRAW: draw_card(s, side * 2 + m.a); break;
     case M_DIPLO: advance_pol(s, m.a, 0); break;
     case M_MUSTER_ELITE: recruit(s, m.a, REGION[m.a].nation, 1); break;
@@ -153,6 +154,20 @@ void fr_actions(State *s, Frame *f) {
             continue;
         }
         CALL(do_action(s, f->v[0]));
+        /* the stacking limit after the action (recruitment may exceed it): the owner removes the excess, figure by
+           figure, back to the reinforcements (RB p. 26-27) */
+        for (f->v[1] = 0; f->v[1] < NREG; f->v[1]++) for (f->v[2] = 0; f->v[2] < 2; f->v[2]++) {
+            while (!s->winner && units(s, f->v[2], f->v[1]) > ((s->siege[f->v[1]] && s->ctrl[f->v[1]] == f->v[2]) ? 5 : 10)) {
+                int r = f->v[1], lo = f->v[2] == FP ? 0 : NFPNAT, hi = f->v[2] == FP ? NFPNAT : NNAT;
+                s->nopt = 0;
+                for (int n = lo; n < hi; n++) { if (s->reg[r][n]) s->opt[s->nopt++] = (uint8_t)n; if (s->eli[r][n]) s->opt[s->nopt++] = (uint8_t)(8 + n); }
+                s->qreg = (uint8_t)r; s->qtag = Q_EXCESS;
+                if (s->nopt > 1) ASK(D_CARD_OPTION, f->v[2]); else s->mv.a = s->opt[0];
+                s->qtag = Q_NONE;
+                { int r2 = f->v[1], n = s->mv.a & 7;
+                  if (s->mv.a >= 8) { s->eli[r2][n]--; s->pool_eli[n]++; } else { s->reg[r2][n]--; s->pool_reg[n]++; } }
+            }
+        }
         s->lock[0] = s->lock[1] = 0; s->comp_moved = 0;
         if (s->hand_n[FP] > 6) CALL(push_discard(s, FP));
         if (s->hand_n[SH] > 6) CALL(push_discard(s, SH));
