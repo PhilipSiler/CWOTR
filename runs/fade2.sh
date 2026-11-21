@@ -21,6 +21,11 @@ for st in $ST; do
   # the step's AVERAGE over its rounds (single rounds swing by ten points: alternate rounds meet different earlier versions)
   echo "step $k (move rules $nu, formula $fl): $(grep 'self-play:' $d/train$k.log | sed 's/.*Shadow wins \([0-9.]*\)% | FP ring \([0-9.]*\)% FP military \([0-9.]*\)% | SH corruption \([0-9.]*\)% SH military \([0-9.]*\)%.*turns \([0-9.]*\) fsp moves \([0-9.]*\).*/\1 \2 \3 \4 \5 \6 \7/' | awk '{for(i=1;i<=7;i++)t[i]+=$i; n++} END{printf "Shadow wins %.1f%% | FP ring %.1f%% FP military %.1f%% | SH corruption %.1f%% SH military %.1f%% | turns %.1f fsp moves %.1f", t[1]/n,t[2]/n,t[3]/n,t[4]/n,t[5]/n,t[6]/n,t[7]/n}') | $(grep -o 'mean |prior| [0-9.]*, mean |network correction| [0-9.]*' $d/train$k.log | tail -1)" >> $d/summary.txt
   for x in fp pfp sh psh; do cp $d/latest.$x $d/step$k.$x; done
+  # a clean reading of the step: the new pair against itself and the new Shadow against fp_aw7, this step's rules and lean,
+  # no exploration, no earlier versions (the training games above mix in earlier versions, which moves their shares a lot)
+  for pr in "$d/latest $d/latest" "runs/keep/fp_aw7 $d/latest"; do
+    echo "    reading, $pr: $(env WOTR_W=12:0,18:0 WOTR_NUDGE=$nu WOTR_HUMAN_SH=$le WOTR_HUMAN_FP=$le $L "$@" ./bin/wotr_x eval $pr 300 9 2>&1 | grep 'games | Shadow wins' | sed 's/.*games | //; s/draws.*turns/turns/' | cut -c1-140)" >> $d/summary.txt
+  done
   k=$((k + 1))
 done
 P="WOTR_W=12:0,18:0 WOTR_NUDGE=$nu WOTR_HUMAN_SH=${LEAN:-0} WOTR_HUMAN_FP=${LEAN:-0}"
