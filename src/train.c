@@ -891,14 +891,6 @@ static int cmd_train(int argc, char **argv) {
     if (getenv("WOTR_SPEC_FADE")) g_spec_fade = (float)atof(getenv("WOTR_SPEC_FADE"));
     if (getenv("WOTR_ROLL_TEACH")) sscanf(getenv("WOTR_ROLL_TEACH"), "%f,%f,%f,%f,%f", &g_rteach[0], &g_rteach[1], &g_rteach[2], &g_rteach[3], &g_rteach[4]);
     if (getenv("WOTR_STYLE")) sscanf(getenv("WOTR_STYLE"), "%f,%f", &g_style, &g_style_s);
-    if (getenv("WOTR_REW")) {
-        float m[8];
-        if (sscanf(getenv("WOTR_REW"), "%f,%f,%f,%f,%f,%f,%f,%f", &m[0], &m[1], &m[2], &m[3], &m[4], &m[5], &m[6], &m[7]) != 8) { fprintf(stderr, "WOTR_REW needs eight numbers: FPMV,FPRV,FPML,FPRL,SPMV,SPRV,SPML,SPRL\n"); exit(1); }
-        g_out[FP][0] = (1 + m[1]) / 2; g_out[FP][1] = (1 + m[0]) / 2; g_out[FP][2] = (1 - m[3]) / 2; g_out[FP][3] = (1 - m[2]) / 2;   /* Ring win, military win, lost to corruption, lost to conquest */
-        g_out[SH][0] = (1 + m[4]) / 2; g_out[SH][1] = (1 + m[5]) / 2; g_out[SH][2] = (1 - m[7]) / 2; g_out[SH][3] = (1 - m[6]) / 2;   /* conquest, corruption, lost to the Ring, lost to a military victory */
-        g_out_on = 1; memcpy(agent_out, g_out, sizeof g_out); agent_out_on = 1;
-        printf("outcome modifiers: FPMV %.2f FPRV %.2f FPML %.2f FPRL %.2f | SPMV %.2f SPRV %.2f SPML %.2f SPRL %.2f\n", m[0], m[1], m[2], m[3], m[4], m[5], m[6], m[7]);
-    }
     if (getenv("WOTR_AWLES_SH")) awles_load(SH, getenv("WOTR_AWLES_SH"));
     if (getenv("WOTR_AWLES_FP")) awles_load(FP, getenv("WOTR_AWLES_FP"));
     if (getenv("WOTR_LESSONS")) { char pth[600]; if (sscanf(getenv("WOTR_LESSONS"), "%599[^,],%f", pth, &g_les_share) == 2) g_nles = lessons_load(pth, &g_les, &g_les_lab); }
@@ -1493,7 +1485,20 @@ static int cmd_awlearn(int argc, char **argv) {
     return 0;
 }
 
+/* WOTR_REW is read for every command, so that readings (eval) are played with the same values the players were trained with */
+static void rew_init(void) {
+    if (getenv("WOTR_REW")) {
+        float m[8];
+        if (sscanf(getenv("WOTR_REW"), "%f,%f,%f,%f,%f,%f,%f,%f", &m[0], &m[1], &m[2], &m[3], &m[4], &m[5], &m[6], &m[7]) != 8) { fprintf(stderr, "WOTR_REW needs eight numbers: FPMV,FPRV,FPML,FPRL,SPMV,SPRV,SPML,SPRL\n"); exit(1); }
+        g_out[FP][0] = (1 + m[1]) / 2; g_out[FP][1] = (1 + m[0]) / 2; g_out[FP][2] = (1 - m[3]) / 2; g_out[FP][3] = (1 - m[2]) / 2;   /* Ring win, military win, lost to corruption, lost to conquest */
+        g_out[SH][0] = (1 + m[4]) / 2; g_out[SH][1] = (1 + m[5]) / 2; g_out[SH][2] = (1 - m[7]) / 2; g_out[SH][3] = (1 - m[6]) / 2;   /* conquest, corruption, lost to the Ring, lost to a military victory */
+        g_out_on = 1; memcpy(agent_out, g_out, sizeof g_out); agent_out_on = 1;
+        printf("outcome modifiers: FPMV %.2f FPRV %.2f FPML %.2f FPRL %.2f | SPMV %.2f SPRV %.2f SPML %.2f SPRL %.2f\n", m[0], m[1], m[2], m[3], m[4], m[5], m[6], m[7]);
+    }
+}
+
 int main(int argc, char **argv) {
+    rew_init();
     if (getenv("WOTR_SPEC")) g_spec = atoi(getenv("WOTR_SPEC"));
     if (getenv("WOTR_ROLL_FP")) sscanf(getenv("WOTR_ROLL_FP"), "%f,%f,%f,%f,%f", &g_roll[FP][0], &g_roll[FP][1], &g_roll[FP][2], &g_roll[FP][3], &g_roll[FP][4]);
     if (getenv("WOTR_ROLL_SH")) sscanf(getenv("WOTR_ROLL_SH"), "%f,%f,%f,%f,%f", &g_roll[SH][0], &g_roll[SH][1], &g_roll[SH][2], &g_roll[SH][3], &g_roll[SH][4]);

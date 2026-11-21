@@ -18,5 +18,7 @@ for st in "0.3 0.10" "0.2 0.07" "0.1 0.03" "0 0" "0 0"; do
   k=$((k + 1))
 done
 P="WOTR_W=12:0,18:0 WOTR_NUDGE=0 WOTR_LANE_FP=0 WOTR_HUMAN_SH=0 WOTR_HUMAN_FP=0"
+echo "new pair, guidance off, played WITH its values: $(env $P "$@" ./bin/wotr_x eval $d/latest $d/latest 400 9 2>&1 | grep 'games | Shadow wins' | sed 's/.*games | //; s/draws.*turns/turns/' | cut -c1-150)" >> $d/summary.txt
+# the plain game (every win counts 1), which is what matters in the end
 for pr in "$d/latest $d/latest" "$d/latest runs/raid2/latest" "runs/keep/fp_aw7 $d/latest"; do env $P ./bin/wotr_x eval $pr 400 9 2>&1 | grep 'games | Shadow wins' | sed 's/: 396 games//; s/draws.*turns/turns/' | cut -c1-200; done >> $d/summary.txt
 touch $d/done
