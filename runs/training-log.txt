@@ -685,3 +685,7 @@ YARDSTICKS, each side on its own settings (new: WOTR_NUDGE_FP / WOTR_NUDGE_SH an
   SPML 0.5     42.4 / 10.3 / 32.2 | 42.1 / 10.9 / 31.1   (no real change)
   SPRL 0.5     13.0 /  0.0 / 13.0 | 14.8 /  0.0 / 14.8   (lets the Ring through 85%)
  None of the Shadow's modifiers helps; plain is best. Note the Shadow also loses ground in 40 plain rounds (48.0 -> 39.2 against fp_aw7; conquest 18.5 -> 10.4). Best combination so far: WOTR_REW=0.3,1,1,1,1,1,1,1 (or FPMV 0.1). Next: FPMV 0.3 with the Free Peoples' lesson share at 0.5.
+2026-11-21 quick tests, Free Peoples, lesson share 0.5 (vs shadow_aw6 Shadow wins / Ring / raids / moves | vs raid2):
+  plain, lessons 0.5       57.6 / 38.6 / 3.9 / 14.5 | 61.8 / 30.0 / 8.2 / 13.9
+  FPMV 0.3, lessons 0.5    59.3 / 38.7 / 2.0 / 14.8 | 64.6 / 30.1 / 5.1 / 14.7
+ (lessons 0.2: plain 54.5 / 34.7 / 10.8 / 12.8; FPMV 0.3 55.2 / 38.2 / 6.6 / 13.6; starting player 57.2 / 40.4 / 2.4 / 14.9.) The larger lesson share holds the Ring's pace; the modifier trims the raids on top (3.9 -> 2.0, 8.2 -> 5.1). Together the Free Peoples stay where they started over 40 rounds. Neither makes them stronger. Next: anc5 = three anchored generations with lessons 0.5 and FPMV 0.3 (does it hold across generations, where anc2/anc3 slid?).
