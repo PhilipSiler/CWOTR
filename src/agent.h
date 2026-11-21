@@ -55,8 +55,9 @@ float agent_value(Agent *a, const State *s);                       /* log-odds t
 /* Outcome values per side (train.c: the eight modifiers of WOTR_REW), as the side now choosing (agent_pov) counts them: the
    same numbers its network is taught, so the last step to a win of a kind is worth what that kind is worth. Off: +-WIN_LOGIT. */
 extern float agent_out[2][4]; extern int agent_out_on; extern _Thread_local int agent_pov;
+extern float agent_stall;      /* WOTR_STALL=<x>: a game cut off at the turn limit counts as -x to the Shadow (0: a plain draw; 1: as bad as a loss); the Free Peoples still see a draw */
 static inline float terminal_value(const State *s) {
-    if (s->win_type == WIN_NONE) return 0.0f;
+    if (s->win_type == WIN_NONE) { float v = agent_pov == SH ? (1 + agent_stall) / 2 : 0.5f; return v >= 1 ? WIN_LOGIT : logf(v / (1 - v)); }
     if (agent_out_on) {
         int w = s->win_type;
         float v = agent_pov == FP ? agent_out[FP][w == WIN_RING ? 0 : w == WIN_FP_MIL ? 1 : w == WIN_CORRUPTION ? 2 : 3]

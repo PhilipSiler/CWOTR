@@ -409,6 +409,7 @@ static void play_game(Job *j, uint64_t seed) {
     }
     float z = s.win_type == WIN_NONE ? 0.5f : s.winner == 1 ? 1.0f : 0.0f;     /* turn cap = draw */
     float zs[2] = {z, z};                       /* the result as each side's own network is taught it (FP's view) */
+    if (s.win_type == WIN_NONE && agent_stall > 0) zs[SH] = (1 + agent_stall) / 2;      /* the turn limit: time is on the Free Peoples' side, so a stalled game is the Shadow's failure */
     if (g_out_on && s.win_type != WIN_NONE) {
         int w = s.win_type;
         zs[FP] = g_out[FP][w == WIN_RING ? 0 : w == WIN_FP_MIL ? 1 : w == WIN_CORRUPTION ? 2 : 3];
@@ -1496,6 +1497,7 @@ static int cmd_awlearn(int argc, char **argv) {
 
 /* WOTR_REW is read for every command, so that readings (eval) are played with the same values the players were trained with */
 static void rew_init(void) {
+    if (getenv("WOTR_STALL")) agent_stall = (float)atof(getenv("WOTR_STALL"));
     if (getenv("WOTR_RECORD") && strlen(getenv("WOTR_RECORD")) > 3) { g_rec_side = getenv("WOTR_RECORD")[0] == 'F' ? FP : SH; g_rec = getenv("WOTR_RECORD") + 3; }
     if (getenv("WOTR_REW")) {
         float m[8];
