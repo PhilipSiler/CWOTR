@@ -1,5 +1,5 @@
 #!/bin/sh
-# rew.sh <name> <rounds> [WOTR_OUT_FP=... WOTR_OUT_SH=...]: does a choice of outcome values stop the collapse (Philip, 2026-11-20)?
+# rew.sh <name> <rounds> [WOTR_REW=FPMV,FPRV,FPML,FPRL,SPMV,SPRV,SPML,SPRL]: does a choice of outcome values stop the collapse (Philip, 2026-11-20)?
 # Both sides learn together from our last good players (Free Peoples fp_aw7, Shadow raid2) with ALL written guidance off
 # (no move rules, no leans, no lessons; the scoring formula stays at 0.30, FLOORV, because these players were trained
 # with it - with the formula off too, rw0-rw2, they play badly from round 1 and nothing can be read). The fear: the Free

@@ -1,5 +1,5 @@
 #!/bin/sh
-# rewfade.sh <name> [WOTR_OUT_FP=... WOTR_OUT_SH=...]: the fairer test of outcome values (2026-11-20). rew.sh switched the
+# rewfade.sh <name> [WOTR_REW=FPMV,FPRV,FPML,FPRL,SPMV,SPRV,SPML,SPRL]: the fairer test of outcome values (2026-11-20). rew.sh switched the
 # written move rules off at once, and the starting pair lost its human shape before any training. Here play starts with
 # the move rules and leans on (10 turns, 15 Fellowship moves, Ring 40%) and they are taken away in steps while both sides
 # learn together: move rules 0.3 0.2 0.1 0 0, leans 0.10 0.07 0.03 0 0, STAGE rounds each (default 30). The scoring

@@ -52,7 +52,7 @@ int   spec_group(int dkind);                                       /* SP_... or 
 float agent_value(Agent *a, const State *s);                       /* log-odds that FP wins (+-WIN_LOGIT at game end) */
 #define WIN_LOGIT 30.0f
 /* log-odds of a finished game: a game stopped by the turn cap is a draw, so nobody can win by waiting */
-/* Outcome values per side (train.c: WOTR_OUT_FP / WOTR_OUT_SH), as the side now choosing (agent_pov) counts them: the
+/* Outcome values per side (train.c: the eight modifiers of WOTR_REW), as the side now choosing (agent_pov) counts them: the
    same numbers its network is taught, so the last step to a win of a kind is worth what that kind is worth. Off: +-WIN_LOGIT. */
 extern float agent_out[2][4]; extern int agent_out_on; extern _Thread_local int agent_pov;
 static inline float terminal_value(const State *s) {

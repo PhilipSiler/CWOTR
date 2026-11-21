@@ -63,13 +63,15 @@ static int g_teach[3]; static float g_teach_share = 0, g_teach_part = 1; static 
    the hand-written nudges for those decisions, falls in a straight line to nothing over WOTR_SPEC_FADE rounds (480)
    from the round they were switched on (kept in <dir>/spec_start). Files: <player>.s<family><f|s>. */
 static int g_spec = 0; static float g_spec_fade = 480;
-static float g_soon = 0, g_soon_fade = 1, g_ringwin = 1, g_corrwin = 1;
-/* WOTR_OUT_FP="ring,military,lost to corruption,lost to conquest" and WOTR_OUT_SH="conquest,corruption,lost to the Ring,
-   lost to a military victory" (Philip, 2026-11-20): what each way of ending is worth to that side's own network, 0..1
-   (plain: 1,1,0,0). Each side has its own network, so the two tables need not mirror each other. */
+/* The eight outcome modifiers (Philip, 2026-11-20), the ONLY reward switch: WOTR_REW="FPMV,FPRV,FPML,FPRL,SPMV,SPRV,SPML,SPRL".
+   A victory is worth +modifier and a loss -modifier to the side concerned, on a scale where a plain win is +1 and a plain
+   loss -1 (all eight at 1 = the plain game). FPMV/FPRV: the Free Peoples win by military victory / by the Ring; FPML/FPRL:
+   they lose to Shadow's conquest / to corruption. SPMV/SPRV: Shadow wins by conquest / by corruption; SPML/SPRL: Shadow
+   loses to a Free Peoples military victory / to the Ring. Each side has its own network, so the two halves need not mirror
+   each other. The same values score a finished game inside the player's move choice (agent_out). Kept per side as the
+   chance-like number the networks use, (1 + value) / 2: [side][its main win, its other win, ...]. The earlier switches
+   (WOTR_RINGWIN, CORRWIN, SPEED, RINGFIRST, SOON, OUT_FP/OUT_SH) are gone: each is a special case of these eight. */
 static float g_out[2][4] = {{1, 1, 0, 0}, {1, 1, 0, 0}}; static int g_out_on;
-static float g_speed[3] = {0, 8, 0.5f};
-static float g_rfirst[4] = {-1, 8, 0.3f, 0.6f};
 static float g_rteach[5] = {0, 12, 0.25f, 0.5f, SH};
 static float g_roll[2][5] = {{0, 0, 0.15f, 12, 0}, {0, 0, 0.15f, 12, 0}};   /* WOTR_ROLL_FP / WOTR_ROLL_SH="ms,rollouts,tau,shortlist,further turns": the rollout chooser for that side in play (not in training games) */
 /* WOTR_STYLE="share,spread": in that share of training games Shadow plays the whole game in a random style: each term
@@ -397,35 +399,6 @@ static void play_game(Job *j, uint64_t seed) {
         }
     }
     float z = s.win_type == WIN_NONE ? 0.5f : s.winner == 1 ? 1.0f : 0.0f;     /* turn cap = draw */
-    /* WOTR_SOON=<x>: a temporary reason for Shadow to conquer early (Philip, 2026-11-15/16). Only a conquest by turn 8
-       is a full Shadow win; a later conquest is worth x less for each turn after the eighth, down to 0.2 less, and a
-       win by corruption 0.2 less. The whole thing fades in a straight line to nothing over the rounds of the run. */
-    /* WOTR_RINGWIN=<x> (below 1): a Ring win counts only x for the Free Peoples, a conquest win still 1. For training a
-       sparring partner that goes after Shadow's strongholds, so that Shadow learns to hold them (AlphaWOTR took Dol
-       Guldur and Moria from a Shadow whose training opponents never tried). Not for a player we would field. */
-    if (g_ringwin < 1 && s.winner == 1 && s.win_type == WIN_RING) z = g_ringwin;
-    /* WOTR_CORRWIN=<x>: a win by corruption counts only x for Shadow, a conquest win still 1 (the mirror of WOTR_RINGWIN:
-       for a sparring partner that conquers fast, so that the Free Peoples learn to defend). */
-    if (g_corrwin < 1 && s.winner == 2 && s.win_type == WIN_CORRUPTION) z = 1 - g_corrwin;
-    /* WOTR_SPEED="x,from,cap" (Philip, 2026-11-17: "adjusting the conquest reward based on speed"): a conquest on turn `from`
-       or earlier is a full Shadow win; each turn later is worth x less, down to `cap` less at most. Does not fade, and
-       leaves corruption wins to WOTR_CORRWIN. */
-    /* WOTR_RINGFIRST="x,from,cap,mil" (Philip, 2026-11-18, the break-glass incentive: "if you have to otherwise incentivize
-       our FP to go for ring victories, please do so"): for the Free Peoples a Ring victory on turn `from` or earlier is a
-       full win and each turn later is worth x less (at most cap less); a victory by taking Shadow's strongholds counts
-       only `mil`. Left to plain training against a Shadow that empties its strongholds they drifted to raiding. */
-    if (g_rfirst[0] >= 0 && s.winner == 1) {
-        if (s.win_type == WIN_RING) { float late = g_rfirst[0] * ((float)s.turn - g_rfirst[1]); z = 1.0f - (late < 0 ? 0 : late > g_rfirst[2] ? g_rfirst[2] : late); }
-        else if (s.win_type == WIN_FP_MIL) z = g_rfirst[3];
-    }
-    if (g_speed[0] > 0 && s.winner == 2 && s.win_type == WIN_SH_MIL) {
-        float late = g_speed[0] * ((float)s.turn - g_speed[1]);
-        z = late < 0 ? 0 : late > g_speed[2] ? g_speed[2] : late;
-    }
-    if (g_soon > 0 && s.winner == 2 && s.win_type != WIN_NONE) {
-        float late = s.win_type == WIN_SH_MIL ? g_soon * (float)(s.turn - 8) : 0.2f;
-        z = g_soon_fade * (late < 0 ? 0 : late > 0.2f ? 0.2f : late);
-    }
     float zs[2] = {z, z};                       /* the result as each side's own network is taught it (FP's view) */
     if (g_out_on && s.win_type != WIN_NONE) {
         int w = s.win_type;
@@ -916,17 +889,16 @@ static int cmd_train(int argc, char **argv) {
     if (getenv("WOTR_TEACH_POL")) g_teach_pol = atoi(getenv("WOTR_TEACH_POL"));
     if (getenv("WOTR_TEACH")) sscanf(getenv("WOTR_TEACH"), "%d,%d,%d,%f,%f", &g_teach[0], &g_teach[1], &g_teach[2], &g_teach_share, &g_teach_part);
     if (getenv("WOTR_SPEC_FADE")) g_spec_fade = (float)atof(getenv("WOTR_SPEC_FADE"));
-    if (getenv("WOTR_SOON")) g_soon = (float)atof(getenv("WOTR_SOON"));
     if (getenv("WOTR_ROLL_TEACH")) sscanf(getenv("WOTR_ROLL_TEACH"), "%f,%f,%f,%f,%f", &g_rteach[0], &g_rteach[1], &g_rteach[2], &g_rteach[3], &g_rteach[4]);
-    if (getenv("WOTR_RINGFIRST")) sscanf(getenv("WOTR_RINGFIRST"), "%f,%f,%f,%f", &g_rfirst[0], &g_rfirst[1], &g_rfirst[2], &g_rfirst[3]);
-    if (getenv("WOTR_SPEED")) sscanf(getenv("WOTR_SPEED"), "%f,%f,%f", &g_speed[0], &g_speed[1], &g_speed[2]);
     if (getenv("WOTR_STYLE")) sscanf(getenv("WOTR_STYLE"), "%f,%f", &g_style, &g_style_s);
-    if (getenv("WOTR_CORRWIN")) g_corrwin = (float)atof(getenv("WOTR_CORRWIN"));
-    if (getenv("WOTR_OUT_FP")) g_out_on |= sscanf(getenv("WOTR_OUT_FP"), "%f,%f,%f,%f", &g_out[FP][0], &g_out[FP][1], &g_out[FP][2], &g_out[FP][3]) == 4;
-    if (getenv("WOTR_OUT_SH")) g_out_on |= sscanf(getenv("WOTR_OUT_SH"), "%f,%f,%f,%f", &g_out[SH][0], &g_out[SH][1], &g_out[SH][2], &g_out[SH][3]) == 4;
-    if (g_out_on) { memcpy(agent_out, g_out, sizeof g_out); agent_out_on = 1; }
-    if (g_out_on) printf("outcome values: Free Peoples ring %.2f military %.2f lost to corruption %.2f lost to conquest %.2f | Shadow conquest %.2f corruption %.2f lost to the Ring %.2f lost to a military victory %.2f\n", g_out[FP][0], g_out[FP][1], g_out[FP][2], g_out[FP][3], g_out[SH][0], g_out[SH][1], g_out[SH][2], g_out[SH][3]);
-    if (getenv("WOTR_RINGWIN")) g_ringwin = (float)atof(getenv("WOTR_RINGWIN"));
+    if (getenv("WOTR_REW")) {
+        float m[8];
+        if (sscanf(getenv("WOTR_REW"), "%f,%f,%f,%f,%f,%f,%f,%f", &m[0], &m[1], &m[2], &m[3], &m[4], &m[5], &m[6], &m[7]) != 8) { fprintf(stderr, "WOTR_REW needs eight numbers: FPMV,FPRV,FPML,FPRL,SPMV,SPRV,SPML,SPRL\n"); exit(1); }
+        g_out[FP][0] = (1 + m[1]) / 2; g_out[FP][1] = (1 + m[0]) / 2; g_out[FP][2] = (1 - m[3]) / 2; g_out[FP][3] = (1 - m[2]) / 2;   /* Ring win, military win, lost to corruption, lost to conquest */
+        g_out[SH][0] = (1 + m[4]) / 2; g_out[SH][1] = (1 + m[5]) / 2; g_out[SH][2] = (1 - m[7]) / 2; g_out[SH][3] = (1 - m[6]) / 2;   /* conquest, corruption, lost to the Ring, lost to a military victory */
+        g_out_on = 1; memcpy(agent_out, g_out, sizeof g_out); agent_out_on = 1;
+        printf("outcome modifiers: FPMV %.2f FPRV %.2f FPML %.2f FPRL %.2f | SPMV %.2f SPRV %.2f SPML %.2f SPRL %.2f\n", m[0], m[1], m[2], m[3], m[4], m[5], m[6], m[7]);
+    }
     if (getenv("WOTR_AWLES_SH")) awles_load(SH, getenv("WOTR_AWLES_SH"));
     if (getenv("WOTR_AWLES_FP")) awles_load(FP, getenv("WOTR_AWLES_FP"));
     if (getenv("WOTR_LESSONS")) { char pth[600]; if (sscanf(getenv("WOTR_LESSONS"), "%599[^,],%f", pth, &g_les_share) == 2) g_nles = lessons_load(pth, &g_les, &g_les_lab); }
@@ -981,7 +953,6 @@ static int cmd_train(int argc, char **argv) {
     for (int it = 0; it < iters; it++, done++) {
         static Job jobs[64]; memset(jobs, 0, sizeof jobs);
         int slot = it % WINDOW;
-        g_soon_fade = 1.0f - (float)it / (float)iters;
         cur->fp.p.alpha = cur->sh.p.alpha = done < half ? 1.0f - (float)done / half : 0.0f;
         if (cur->fp.p.alpha < g_floor) cur->fp.p.alpha = cur->sh.p.alpha = g_floor;
         if (g_spec) { float sa = cur->fp.p.alpha * (1.0f - (float)(done - spec_start) / g_spec_fade); if (sa < 0) sa = 0; for (int g = 0; g < NSPEC; g++) cur->spec[g][FP].p.alpha = cur->spec[g][SH].p.alpha = sa; }
