@@ -5,8 +5,10 @@
 # Here each side learns alone, hold.sh's way: one generation = the Free Peoples train ROUNDS rounds against a pool of
 # Shadows, then the Shadow trains ROUNDS rounds against a pool of Free Peoples. The pools are the old keepers (anchors)
 # plus the newest generations. The learner plays with NO move rules and NO formula, leaning on its own suggester at
-# every decision, with its own recorded lessons kept in (share LES, default 0.2); EXTRA = more settings for the training
-# (for example the outcome modifiers, EXTRA="WOTR_REW=0.3,1,1,1,1,1,1,1"; the readings stay plain); every opponent plays with the written
+# every decision, with its own recorded lessons kept in (share LES, default 0.2); EXTRA_FP / EXTRA_SH = more settings
+# for that side's training (for example EXTRA_FP="WOTR_REW=0.1,1,1,1,1,1,1,1"; the readings stay plain). They are kept
+# apart because the outcome modifiers also steer the FIXED opponents' move choice: with FPMV 0.1 set during the Shadow's
+# training the raider in its pool stops raiding and the Shadow learns nothing about raids (anc8, anc9); every opponent plays with the written
 # rules at 0.3 (the per-side switches WOTR_NUDGE_FP / _SH). Plain rewards.
 # The raider slow2/fp31 is a quarter of the Shadow's opponents: at a sixth (anc8) the rule-free Shadow still lost 92% to
 # it; at a third (raidfix.sh) 40 rounds brought that to 43%.
@@ -26,10 +28,10 @@ ev() { env WOTR_W=12:0,18:0 WOTR_HUMAN_SH=0.1 WOTR_HUMAN_FP=0.1 WOTR_DEEP_SH=3,4
 g=1
 while [ $g -le $G ]; do
   f=$d/fp$g; mkdir $f; for x in fp sh pfp psh; do cp $cfp.$x $f/latest.$x; done; echo 4200 > $f/rounds
-  env $E $LFP $EXTRA WOTR_FREEZE_SH=$(pool 2 "$ASH" $SHP) WOTR_AWLES_FP=$LES,$(cat runs/keep/self_all_fp_files.txt) ./bin/wotr_x train $f $R 2000 9 960 > $f/train.log 2>&1
+  env $E $LFP $EXTRA_FP WOTR_FREEZE_SH=$(pool 2 "$ASH" $SHP) WOTR_AWLES_FP=$LES,$(cat runs/keep/self_all_fp_files.txt) ./bin/wotr_x train $f $R 2000 9 960 > $f/train.log 2>&1
   cfp=$f/latest; FPP="$FPP $cfp"
   s=$d/sh$g; mkdir $s; for x in fp sh pfp psh; do cp $csh.$x $s/latest.$x; done; echo 4200 > $s/rounds
-  env $E $LSH $EXTRA WOTR_FREEZE_FP=$(pool 1 "$AFP" $FPP) WOTR_AWLES_SH=$LES,$(cat runs/keep/self_all_sh_files.txt) ./bin/wotr_x train $s $R 2000 9 960 > $s/train.log 2>&1
+  env $E $LSH $EXTRA_SH WOTR_FREEZE_FP=$(pool 1 "$AFP" $FPP) WOTR_AWLES_SH=$LES,$(cat runs/keep/self_all_sh_files.txt) ./bin/wotr_x train $s $R 2000 9 960 > $s/train.log 2>&1
   csh=$s/latest; SHP="$SHP $csh"
   {
     echo "generation $g $(date +%H:%M)"
