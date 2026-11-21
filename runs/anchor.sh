@@ -13,7 +13,7 @@
 cd /Users/philipsiler/Code/WOTR-RL/CWOTR
 n=$1; G=$2; d=runs/$n; mkdir $d || exit 1
 R=${ROUNDS:-40}; LES=${LES:-0.2}
-ASH="runs/keep/shadow_aw6"; AFP="runs/keep/fp_aw7 runs/keep/fp_aw4"
+ASH=${ASH:-"runs/keep/shadow_aw6 runs/raid2/latest"}; AFP=${AFP:-"runs/keep/fp_aw7 runs/keep/fp_aw4"}      # raid2 guards its strongholds: against shadow_aw6 alone the Free Peoples learn to raid (anc1)
 SHP=""; FPP=""; csh=${SH0:-runs/keep/norules3}; cfp=${FP0:-runs/keep/norules3}
 E="WOTR_TD=0 WOTR_EXACT=1,0 WOTR_EXEMPT=0,1 WOTR_FULL=0.04 WOTR_TEMP=0.06 WOTR_FLOOR=0 WOTR_W=12:0,18:0 WOTR_HUMAN_SH=0.1 WOTR_HUMAN_FP=0.1"
 LFP="WOTR_NUDGE_FP=0 WOTR_LANE_FP=0 WOTR_NUDGE_SH=0.3 WOTR_LEAN_ALL_FP=1"      # the Free Peoples are the rule-free side
@@ -23,7 +23,7 @@ ev() { env WOTR_W=12:0,18:0 WOTR_HUMAN_SH=0.1 WOTR_HUMAN_FP=0.1 WOTR_DEEP_SH=3,4
 g=1
 while [ $g -le $G ]; do
   f=$d/fp$g; mkdir $f; for x in fp sh pfp psh; do cp $cfp.$x $f/latest.$x; done; echo 4200 > $f/rounds
-  env $E $LFP WOTR_FREEZE_SH=$(pool 3 "$ASH" $SHP) WOTR_AWLES_FP=$LES,$(cat runs/keep/self_all_fp_files.txt) ./bin/wotr_x train $f $R 2000 9 960 > $f/train.log 2>&1
+  env $E $LFP WOTR_FREEZE_SH=$(pool 2 "$ASH" $SHP) WOTR_AWLES_FP=$LES,$(cat runs/keep/self_all_fp_files.txt) ./bin/wotr_x train $f $R 2000 9 960 > $f/train.log 2>&1
   cfp=$f/latest; FPP="$FPP $cfp"
   s=$d/sh$g; mkdir $s; for x in fp sh pfp psh; do cp $csh.$x $s/latest.$x; done; echo 4200 > $s/rounds
   env $E $LSH WOTR_FREEZE_FP=$(pool 3 "$AFP" $FPP) WOTR_AWLES_SH=$LES,$(cat runs/keep/self_all_sh_files.txt) ./bin/wotr_x train $s $R 2000 9 960 > $s/train.log 2>&1
@@ -32,6 +32,7 @@ while [ $g -le $G ]; do
     echo "generation $g $(date +%H:%M)"
     echo "  new Free Peoples (no rules) vs shadow_aw6 (rules): $(ev "$LFP" $cfp runs/keep/shadow_aw6)"
     echo "  fp_aw7 (rules) vs new Shadow (no rules):           $(ev "$LSH" runs/keep/fp_aw7 $csh)"
+    echo "  new Free Peoples (no rules) vs raid2 (rules):      $(ev "$LFP" $cfp runs/raid2/latest)"
     echo "  new pair, no rules on either side:                 $(ev "WOTR_NUDGE=0 WOTR_LANE_FP=0 WOTR_LEAN_ALL=1" $cfp $csh)"
   } >> $d/progress.txt
   g=$((g + 1))
