@@ -12,6 +12,7 @@
 # rules at 0.3 (the per-side switches WOTR_NUDGE_FP / _SH). Plain rewards.
 # The raider slow2/fp31 is a quarter of the Shadow's opponents: at a sixth (anc8) the rule-free Shadow still lost 92% to
 # it; at a third (raidfix.sh) 40 rounds brought that to 43%.
+# LESSON_FP / LESSON_SH = other lists of lesson files (default: the starting keepers' play with their rules on).
 # After each generation, 600 games a line -> runs/<name>/progress.txt, each side on its own settings, Shadow looking
 # ahead: new Free Peoples vs shadow_aw6 (mark: fp_aw7 50.5, norules3 65.3), fp_aw7 vs new Shadow (mark 50.5, norules3
 # 33.8), and the new pair against itself with no rules. Nothing is overwritten; the folder must not exist yet.
@@ -28,10 +29,10 @@ ev() { env WOTR_W=12:0,18:0 WOTR_HUMAN_SH=0.1 WOTR_HUMAN_FP=0.1 WOTR_DEEP_SH=3,4
 g=1
 while [ $g -le $G ]; do
   f=$d/fp$g; mkdir $f; for x in fp sh pfp psh; do cp $cfp.$x $f/latest.$x; done; echo 4200 > $f/rounds
-  env $E $LFP $EXTRA_FP WOTR_FREEZE_SH=$(pool 2 "$ASH" $SHP) WOTR_AWLES_FP=$LES,$(cat runs/keep/self_all_fp_files.txt) ./bin/wotr_x train $f $R 2000 9 960 > $f/train.log 2>&1
+  env $E $LFP $EXTRA_FP WOTR_FREEZE_SH=$(pool 2 "$ASH" $SHP) WOTR_AWLES_FP=$LES,$(cat ${LESSON_FP:-runs/keep/self_all_fp_files.txt}) ./bin/wotr_x train $f $R 2000 9 960 > $f/train.log 2>&1
   cfp=$f/latest; FPP="$FPP $cfp"
   s=$d/sh$g; mkdir $s; for x in fp sh pfp psh; do cp $csh.$x $s/latest.$x; done; echo 4200 > $s/rounds
-  env $E $LSH $EXTRA_SH WOTR_FREEZE_FP=$(pool 1 "$AFP" $FPP) WOTR_AWLES_SH=$LES,$(cat runs/keep/self_all_sh_files.txt) ./bin/wotr_x train $s $R 2000 9 960 > $s/train.log 2>&1
+  env $E $LSH $EXTRA_SH WOTR_FREEZE_FP=$(pool 1 "$AFP" $FPP) WOTR_AWLES_SH=$LES,$(cat ${LESSON_SH:-runs/keep/self_all_sh_files.txt}) ./bin/wotr_x train $s $R 2000 9 960 > $s/train.log 2>&1
   csh=$s/latest; SHP="$SHP $csh"
   {
     echo "generation $g $(date +%H:%M)"
