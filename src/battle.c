@@ -319,7 +319,7 @@ void fr_round(State *s, Frame *f) {
             for (int c = side * 48; c < side * 48 + 48; c++) if (s->card_where[c] == W_HAND && cc_playable(s, side, c)) s->opt[s->nopt++] = (uint8_t)c;
             if (side == SH && s->card_where[CARD_BALROG_OF_MORIA] == W_TABLE && cc_playable(s, SH, CARD_BALROG_OF_MORIA)) s->opt[s->nopt++] = CARD_BALROG_OF_MORIA;
         }
-        if (s->nopt > 1) {
+        if (s->nopt > 1 || wotr_ask_every_card) {
             ASK(D_BATTLE_CARD, f->v[0] == 0 ? att : def);
             side = f->v[0] == 0 ? att : def;
             if (s->mv.a != 255) {

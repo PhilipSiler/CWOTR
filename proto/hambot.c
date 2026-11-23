@@ -61,6 +61,29 @@ enum { RQ_DICE, RQ_TILE, RQ_DRAW, RQ_HAND, RQ_COMP, RQ_D6 };
 typedef struct { uint8_t type, side, deck, used; int16_t val; uint8_t roll; } Rand;   /* roll: 0 other, 1 combat, 2 leader_reroll */
 #define MAXRAND 4096
 static Rand rq[MAXRAND]; static int nrq;
+/* The official rules ask the Leader re-roll after the Combat roll, so its dice come later than the roll's: a move that
+ * needed one before it came (reroll_missing) waits (reroll_wait) and is played again from its snapshot once they come. */
+static int reroll_missing, reroll_wait, snap_nrq;
+/* The referee went on without a re-roll for a side (by its count it had none): that side's re-roll dice all miss here. */
+static int reroll_misses;
+/* The referee asks the passes on a hidden hand (new_game: official_rules, hidden_passes not false): so does the copy. */
+static int hidden_passes;
+/* The region a card's Army move of ours goes to (the referee's answer): its "how many go" is every unit, as CWOTR moves them. */
+static int card_move_to = -1;
+/* Following one of our own card's answers or selections: the engine may have run ahead of the referee (it plays the card's
+ * moves at once), so a phase it reached is not one the referee skipped. */
+static int following_own_card;
+/* Where the referee is (turn_started, phase_started; each decision's view): a Fellowship phase the copy reached is one the
+ * referee skipped only once the referee is there too (the engine runs ahead, into the next turn, after an advance say). */
+static int ref_turn, ref_phase;
+static int guide_skip_pending;  /* the Guide's ability declined before the engine asks it (guide_skip_settle) */
+static int route_pending;       /* a card's Army move "from>to" just followed: its "Which way?" may come next */
+static int phase_index(const char *p) {
+    static const char *const ph[] = { "RECOVER", "FELLOWSHIP", "HUNT_ALLOCATION", "ACTION_ROLL", "ACTION_RESOLUTION", "VICTORY_CHECK" };
+    for (int i = 0; p && i < 6; i++) if (!strcmp(p, ph[i])) return i;
+    return -1;
+}
+static int referee_at_fsp_phase(void) { return ref_turn > R.s.turn || (ref_turn == R.s.turn && ref_phase >= 1); }
 static void rq_clear(void) { nrq = 0; }
 static void rq_add(Rand r) { if (nrq < MAXRAND) rq[nrq++] = r; }
 
@@ -214,6 +237,7 @@ static uint32_t hook(State *s, uint32_t n, int kind) {
     case 6: {
         if ((i = rq_pop(RQ_COMP, -1, -1, 1, 0)) < 0) return soft(s, n, "a Companion");
         int c = rq[i].val, m = fsp_comps(s), k = 0;
+        VLOG("  the referee's random Companion: %s (queue entry %d of %d)", c >= 0 && c < NCOMP ? CHAR_KEY[c] : "?", i, nrq);
         if (c < 0 || c >= NCOMP || !((m >> c) & 1)) return soft(s, n, "a Companion not in the Fellowship");
         for (int u = 0; u < c; u++) k += (m >> u) & 1;
         return (uint32_t)k;
@@ -224,6 +248,7 @@ static uint32_t hook(State *s, uint32_t n, int kind) {
             int side = (kind == 7 || kind == 9) ? FP : SH, roll = kind <= 8 ? 1 : 2;
             if ((i = rq_pop(RQ_D6, side, -1, 0, roll)) < 0) i = rq_pop(RQ_D6, side, -1, 1, 0);
         } else i = rq_pop(RQ_D6, -1, -1, 1, 0);
+        if (i < 0 && (kind == 9 || kind == 10)) { if (reroll_misses) return 0; reroll_missing = 1; }
         if (i < 0) {
             char what[160];
             const char *kn = kind == 7 ? "FP combat" : kind == 8 ? "SH combat" : kind == 9 ? "FP re-roll" : kind == 10 ? "SH re-roll" : "a die";
@@ -255,9 +280,11 @@ static void apply_followed(Move m) {
     /* every question the rules ask: the engine's pruning (wotr_prune) also settles some inside the rules (a reveal with
        one sensible place), which the referee asks */
     wotr_prune = 0;
-    if (R.s.dkind == D_ACTION) { R.s.rec_n = 0; rec_used = 0; R.s.reloc_on = 0; }     /* a new action: the recruits and card moves logged anew */
+    if (R.s.dkind == D_ACTION) { R.s.rec_n = 0; rec_used = 0; R.s.reloc_on = 0; guide_skip_pending = 0; }     /* a new action: the recruits and card moves logged anew */
     wotr_rnd_hook = hook;
+    wotr_ask_every_card = hidden_passes;
     wotr_apply(&R.s, m);
+    wotr_ask_every_card = 0;
     wotr_rnd_hook = NULL;
     wotr_prune = 1;
     stash_restore();
@@ -293,12 +320,143 @@ static void attack_steps(Leaf *l, const State *s) {
     if (side == FP) { for (int c = 0; c < NCOMP; c++) if (s->comp_loc[c] == src) step(l, K_ARMY_SELECTION, "\"kind\":\"count\",\"count\":1,\"character\":\"%s\"}", comp_key(s, c)); }
     else for (int k = 0; k < NMINION; k++) if (k != M_SARUMAN && s->minion_loc[k] == src) step(l, K_ARMY_SELECTION, "\"kind\":\"count\",\"count\":1,\"character\":\"%s\"}", minion_key(k));
 }
+/* Gwaihir the Windlord, We Prove the Swifter moving a group (option 0x80 | group): bridge.c writes one "move_companion"
+ * of the group's first Companion; the referee lets any Companion of the region lead and then asks each other one there
+ * whether it joins (JOIN_GROUP). The leaves are written so: one per leader of the group, with a join or stay each. */
+static void comp_move_leads(void);
+static void card_group_steps(void) {
+    const State *s = &R.s;
+    if (s->dkind == D_COMP_MOVE) { comp_move_leads(); return; }
+    if (s->dkind != D_CARD_COMP) return;
+    int n0 = nl;
+    for (int i = 0; i < n0; i++) {
+        Move m = L[i].mv[0];
+        if (!(m.a & 0x80) || m.a == 255 || L[i].nstep != 1 || !strstr(L[i].st[0].text, "\"kind\":\"move_companion\"")) continue;
+        int g = m.a & 0x7F, k0 = __builtin_ctz((unsigned)g), from = s->comp_loc[k0];
+        if (from >= NREG) continue;
+        char to[64] = ""; const char *tp = strstr(L[i].st[0].text, "\"to\":\"");
+        if (tp) { tp += 6; size_t k = 0; while (tp[k] && tp[k] != '"' && k < sizeof to - 1) { to[k] = tp[k]; k++; } to[k] = 0; }
+        Leaf base = L[i];
+        for (int lead = 0; lead < NCOMP; lead++) {
+            if (!((g >> lead) & 1)) continue;
+            Leaf *l = lead == k0 ? &L[i] : (nl < MAXLEAF ? &L[nl++] : NULL);
+            if (!l) break;
+            *l = base; l->nstep = 0;
+            step(l, K_CARD_CHOICE, "\"kind\":\"move_companion\",\"character\":\"%s\",\"from\":\"%s\",\"to\":\"%s\"}", CHAR_KEY[lead], REGION_KEY[from], to);
+            int others = comps_at(s, from) & ~(1 << lead);
+            for (int c = 0; c < NCOMP; c++) if ((others >> c) & 1)
+                step(l, K_JOIN_GROUP, "\"kind\":\"%s\",\"character\":\"%s\",\"to\":\"%s\"}", (g >> c) & 1 ? "join" : "stay", comp_key(s, c), to);
+        }
+    }
+}
+/* A Companions' move (a Character die): the engine's list of moves stops at MAXMOVES, which every group of six or seven
+ * Companions in one region (127 groups, each to several regions) exceeds. The moves are written here as bridge.c writes
+ * them: every group, every destination, its first Companion leading, the others of the region joining or staying
+ * (comp_lead: the referee's player may name another Companion of the group first). */
+static int group_range(const State *s, int mask) {      /* movegen.c's comp_range: the group's highest Level, Gandalf the White's 4 */
+    int best = 0, cnt = 0, hob = 0;
+    for (int c = 0; c < NCOMP; c++) if ((mask >> c) & 1) { cnt++; if (c >= C_MERRY) hob++; if (comp_level(s, c) > best) best = comp_level(s, c); }
+    if ((mask & 1) && s->gandalf_white && (cnt == 1 || (cnt == 2 && hob == 1))) return 4;
+    return best;
+}
+static void comp_move_leads(void) {
+    const State *s = &R.s;
+    int w = 0;
+    for (int i = 0; i < nl; i++) if (L[i].mv[0].type != M_COMP_MOVE) L[w++] = L[i];
+    nl = w;
+    int seen = 0;
+    for (int c0 = 0; c0 < NCOMP; c0++) {
+        int from = s->comp_loc[c0];
+        if (from >= NREG || ((seen >> c0) & 1)) continue;
+        int all = comps_at(s, from) & ~s->comp_moved;
+        seen |= comps_at(s, from);
+        for (int g = 1; g < 128; g++) {
+            if (g & ~all) continue;
+            uint8_t reach[NREG], dst[NREG];
+            comp_reach(s, from, group_range(s, g), 0, reach);
+            int nd = comp_dests(s, g, reach, from, dst);
+            for (int d = 0; d < nd; d++) {
+                int lead = __builtin_ctz((unsigned)g);
+                Move m = {M_COMP_MOVE, 0, (uint8_t)g, dst[d], 0, 0, 0, 0};
+                Leaf *l = leaf_new(L, &nl, m);
+                if (!l) return;
+                step(l, K_MOVE_COMPANIONS, "\"kind\":\"move_companion\",\"character\":\"%s\",\"from\":\"%s\",\"to\":\"%s\"}", comp_key(s, lead), REGION_KEY[from], REGION_KEY[dst[d]]);
+                int others = all & ~(1 << lead);
+                for (int c = 0; c < NCOMP; c++) if ((others >> c) & 1)
+                    step(l, K_JOIN_GROUP, "\"kind\":\"%s\",\"character\":\"%s\",\"to\":\"%s\"}", (g >> c) & 1 ? "join" : "stay", comp_key(s, c), REGION_KEY[dst[d]]);
+            }
+        }
+    }
+}
+/* The Companion the referee's player names first for a group's move: in the leaves where he joins the group, he leads
+ * and the one written first joins in his place. */
+static void comp_lead(const char *character) {
+    if (!character || depth != 0) return;
+    char want[80], joins[100]; snprintf(want, sizeof want, "\"character\":\"%s\"", character);
+    snprintf(joins, sizeof joins, "\"kind\":\"join\",\"character\":\"%s\"", character);
+    for (int i = 0; i < nl; i++) {
+        if (!alive[i] || !L[i].nstep || !strstr(L[i].st[0].text, "\"kind\":\"move_companion\"") || strstr(L[i].st[0].text, want)) continue;
+        for (int j = 1; j < L[i].nstep; j++) {
+            if (!strstr(L[i].st[j].text, joins)) continue;
+            const char *c0 = strstr(L[i].st[0].text, "\"character\":\""), *f0 = strstr(L[i].st[0].text, "\",\"from\":");
+            if (!c0 || !f0) break;
+            char lead[40]; size_t n = (size_t)(f0 - (c0 + 13)); if (n >= sizeof lead) break;
+            memcpy(lead, c0 + 13, n); lead[n] = 0;
+            char t0[200], tj[200];
+            snprintf(t0, sizeof t0, "\"kind\":\"move_companion\",\"character\":\"%s\"%s", character, f0 + 1);
+            const char *to = strstr(L[i].st[j].text, "\",\"to\":");
+            snprintf(tj, sizeof tj, "\"kind\":\"join\",\"character\":\"%s\"%s", lead, to ? to + 1 : "}");
+            snprintf(L[i].st[0].text, sizeof L[i].st[0].text, "%s", t0);
+            snprintf(L[i].st[j].text, sizeof L[i].st[j].text, "%s", tj);
+            break;
+        }
+    }
+}
+/* The Breaking of the Fellowship: CWOTR asks the Companions that separate as one set ("answer":"<mask>"), the referee
+ * one at a time ("Which Companion separates?"): one step per Companion of the set. */
+static void breaking_steps(void) {
+    const State *s = &R.s;
+    if (s->dkind != D_CARD_COMP || card_asking(s) != CARD_THE_BREAKING_OF_THE_FELLOWSHIP) return;
+    const char *ck = CARD_KEY[CARD_THE_BREAKING_OF_THE_FELLOWSHIP];
+    for (int i = 0; i < nl; i++) {
+        int m = L[i].mv[0].a;
+        if (L[i].nstep != 1 || m == 255 || !strstr(L[i].st[0].text, "\"count\":")) continue;
+        L[i].nstep = 0;
+        for (int c = 0; c < NCOMP; c++) if ((m >> c) & 1)
+            step(&L[i], K_CARD_CHOICE, "\"kind\":\"card_choice\",\"card\":\"%s\",\"answer\":\"%s\",\"character\":\"%s\"}", ck, comp_key(s, c), comp_key(s, c));
+    }
+}
+/* A set asked one member at a time in the referee's order ("join or stay", the Companions a card separates): the
+ * engine's steps (in its own order) reordered so that the one about this Companion comes next (a group is a set).
+ * same: what the steps of the set share. */
+static int leaf_done(int i);
+static int in_set(const char *t, const char *same) {
+    if (same) return strstr(t, same) != NULL;
+    return strstr(t, "\"kind\":\"join\"") || strstr(t, "\"kind\":\"stay\"");
+}
+static void set_order(const char *character, const char *same) {
+    if (!character || depth < 0) return;
+    char want[80]; snprintf(want, sizeof want, "\"character\":\"%s\"", character);
+    for (int i = 0; i < nl; i++) {
+        if (!alive[i] || leaf_done(i)) continue;
+        const char *t = L[i].st[depth].text;
+        if (!in_set(t, same) || strstr(t, want)) continue;
+        for (int j = depth + 1; j < L[i].nstep; j++) {
+            const char *u = L[i].st[j].text;
+            if (!in_set(u, same)) break;
+            if (strstr(u, want)) { Step x = L[i].st[depth]; L[i].st[depth] = L[i].st[j]; L[i].st[j] = x; break; }
+        }
+    }
+}
+static void join_order(const char *character) { set_order(character, NULL); }
 static int leaves_ensure(void) {
     if (depth >= 0) return nl;
     if (R.s.winner) return 0;
     dice_from_state();
     wotr_prune = 0;                 /* every legal move: the referee's are */
     nl = build_leaves(&R, L);
+    card_group_steps();
+    breaking_steps();
     wotr_prune = 1;
     memset(alive, 1, (size_t)nl);
     depth = 0; target = -1;
@@ -309,6 +467,9 @@ static int all_done(void) { for (int i = 0; i < nl; i++) if (alive[i] && !leaf_d
 /* The state before the last move followed, to replay it when an opponent's card shows that the copy's stand-ins
  * could not have played (the engine does not even ask for a Combat card from a hand without one). */
 static State snap; static Leaf snap_leaf; static uint8_t snap_used[MAXRAND], snap_known[NCARD]; static int snap_ok;
+/* the referee's split applied after that move (sel_fixup): applied again when the move is played again */
+static int snap_fix; static State snap_fix_before; static Move snap_fix_m; static int snap_fix_want[NNAT][4], snap_fix_char[NCOMP + NMINION];
+static void replay_fixup(void);
 /* the last moves applied (HAMBOT_CHECK: where the copy and the referee part) */
 static char recent[8][160]; static int nrecent, diverged;
 /* The face of the die the referee's last Action used: its player picks the die (an Army/Muster or a Will of the West
@@ -334,13 +495,45 @@ static void apply_leaf(int i) {
     }
     snap = R.s; snap_leaf = L[i]; memcpy(snap_known, known, sizeof known);
     for (int k = 0; k < nrq; k++) snap_used[k] = rq[k].used;
-    snap_ok = 1;
+    snap_nrq = nrq;
+    snap_ok = 1; snap_fix = 0;
     wotr_move_str(&R.s, L[i].mv[0], buf, sizeof buf);
     VLOG("  %s plays %s", SIDE_KEY[R.s.dplayer], buf);
     snprintf(recent[nrecent++ % 8], sizeof recent[0], "T%d %s %s", R.s.turn, R.s.dplayer ? "SH" : "FP", buf);
     Leaf lf = L[i];
     if (lf.nmv && lf.mv[0].type == M_VOICE && lf.mv[0].a == 0) { voice_pending = 1; memset(voice_seen, 0, sizeof voice_seen); }
+    reroll_missing = 0;
     for (int k = 0; k < lf.nmv; k++) apply_followed(lf.mv[k]);
+    if (reroll_missing) { reroll_wait = 1; VLOG("  the Leader re-roll's dice are not here yet: the move is played again when they come"); }
+    leaves_reset();
+}
+static void replay_for_reroll(void);
+/* The referee has gone past the Leader re-roll (another question): the waiting move played again with the dice it sent,
+ * and a re-roll it did not make (none for that side by its count) as dice that miss: no hits, as there. */
+static void settle_reroll(void) {
+    if (!reroll_wait) return;
+    replay_for_reroll();
+    if (!reroll_wait) return;
+    reroll_misses = 1;
+    replay_for_reroll();
+    reroll_misses = 0;
+    if (reroll_wait) { reroll_wait = 0; VLOG("  the Leader re-roll could not be played again"); }
+    else VLOG("  the referee made no Leader re-roll here: none (its dice miss)");
+}
+/* The move that waited for the Leader re-roll's dice (reroll_wait), played again from its snapshot now that they may be
+ * queued; it waits on if they are still missing (the other side has not answered yet). */
+static void replay_for_reroll(void) {
+    if (!reroll_wait || !snap_ok) return;
+    reroll_wait = 0;
+    R.s = snap; memcpy(known, snap_known, sizeof known);
+    for (int k = 0; k < nrq; k++) rq[k].used = k < snap_nrq ? snap_used[k] : 0;     /* queued since: unused */
+    Leaf lf = snap_leaf;
+    leaves_reset();
+    reroll_missing = 0;
+    for (int k = 0; k < lf.nmv; k++) apply_followed(lf.mv[k]);
+    replay_fixup();
+    if (reroll_missing) reroll_wait = 1;
+    else VLOG("  played again with the Leader re-roll's dice");
     leaves_reset();
 }
 static void voice_settle(void) {
@@ -363,20 +556,28 @@ static void voice_settle(void) {
 }
 /* Replays the last move with card c (or, c < 0, a card of the opponent's deck that has a Combat text) in the hand. */
 static int replay_with_card(int side, int c, int deck) {
-    if (!snap_ok) return 0;
+    if (!snap_ok) { VLOG("  no move to play again with the opponent's Combat card"); return 0; }
     snap_ok = 0;
+    /* a hidden card: one the engine would offer in this battle (its card question is open now), else any with a Combat
+       text; one not known for certain (a hand or deck stand-in first, else a discard face down) */
+    int d = side * 2 + deck, x = -1;
+    if (c < 0 && R.s.b.active)
+        for (int pass = 0; pass < 2 && x < 0; pass++)
+            for (int k = d * 24; k < d * 24 + 24 && x < 0; k++)
+                if (R.s.card_where[k] != W_TABLE && (pass || R.s.card_where[k] != W_DISCARD) && !known[k] && CARD[k].combat && cc_playable(&R.s, side, k)) x = k;
     R.s = snap; memcpy(known, snap_known, sizeof known);
     for (int k = 0; k < nrq; k++) rq[k].used = snap_used[k];
     if (c >= 0) { if (!ensure_card(&R.s, c, W_HAND)) return 0; }
     else {
-        int d = side * 2 + deck, x = -1;
+        if (x >= 0 && R.s.card_where[x] == W_TABLE) x = -1;
         for (int k = d * 24; k < d * 24 + 24 && x < 0; k++) if (R.s.card_where[k] == W_DECK && !known[k] && CARD[k].combat) x = k;
-        if (x < 0 || !ensure_card(&R.s, x, W_HAND)) return 0;
+        if (x < 0 || !ensure_card(&R.s, x, W_HAND)) { VLOG("  no card of that deck to stand in for the opponent's Combat card"); return 0; }
         known[x] = 0;               /* a guess: the real card replaces it when it shows */
     }
     Leaf lf = snap_leaf;
     leaves_reset();
     for (int k = 0; k < lf.nmv; k++) apply_followed(lf.mv[k]);
+    replay_fixup();
     VLOG("  replayed the last move with a Combat card in the opponent's hand");
     return 1;
 }
@@ -649,9 +850,27 @@ static void sel_fixup(const State *before, Move m) {
     for (int c = 0; c < NCOMP; c++) if (sel_char[c] >= 0 && before->comp_loc[c] == src) s->comp_loc[c] = (uint8_t)(sel_char[c] ? dst : src);
     for (int k = 0; k < NMINION; k++) if (sel_char[NCOMP + k] >= 0 && before->minion_loc[k] == src) s->minion_loc[k] = (uint8_t)(sel_char[NCOMP + k] ? dst : src);
 }
+/* The White Rider asked by the engine for an attack that (with the referee's split) brings no Nazgul and not the
+ * Witch-king: the referee does not ask it (it changes nothing): not used. */
+static void white_rider_unasked(void) {
+    const State *s = &R.s;
+    if (s->dkind != D_CARD_OPTION || s->qtag != Q_WHITE_RIDER || !s->b.active) return;
+    int sr = s->b.att == SH ? s->b.src : s->b.dst;
+    if (s->naz[sr] || s->minion_loc[M_WK] == sr) return;
+    if (!leaves_ensure() || depth != 0) return;
+    for (int i = 0; i < nl; i++) if (alive[i] && L[i].mv[0].a == 255) { VLOG("  The White Rider: no Nazgul in this battle, not asked"); apply_leaf(i); return; }
+}
 static void sel_finalize(void) {
     if (!selmode) return;
     selmode = 0;
+    /* a partial advance (applied already): its split, whatever moves the engine lists now (the next player's) */
+    if (adv_on) {
+        Move m; memset(&m, 0, sizeof m); m.type = M_ARMY; m.a = (uint8_t)adv_src; m.b = (uint8_t)adv_dst;
+        VLOG("  the advance with the referee's split");
+        sel_fixup(&adv_before, m);
+        adv_on = 0;
+        return;
+    }
     int best = -1, bc = 1 << 30;
     for (int i = 0; i < nl; i++) {
         if (!alive[i]) continue;
@@ -659,13 +878,6 @@ static void sel_finalize(void) {
         if (m.type != M_ARMY && m.type != M_ATTACK) continue;
         int cost = abs(m.c - sel_reg) + abs(m.d - sel_eli);
         if (cost < bc) { bc = cost; best = i; }
-    }
-    if (best < 0 && adv_on) {
-        Move m; memset(&m, 0, sizeof m); m.type = M_ARMY; m.a = (uint8_t)adv_src; m.b = (uint8_t)adv_dst;
-        VLOG("  the advance with the referee's split");
-        sel_fixup(&adv_before, m);
-        adv_on = 0;
-        return;
     }
     if (best < 0 && sel_battle && R.s.b.active) {
         Move m; memset(&m, 0, sizeof m); m.type = M_ATTACK; m.a = R.s.b.src; m.b = R.s.b.dst;
@@ -678,6 +890,15 @@ static void sel_finalize(void) {
     State before = R.s; Move m = L[best].mv[0];
     apply_leaf(best);
     sel_fixup(&before, m);
+    snap_fix = 1; snap_fix_before = before; snap_fix_m = m; memcpy(snap_fix_want, sel_want, sizeof sel_want); memcpy(snap_fix_char, sel_char, sizeof sel_char);
+    white_rider_unasked();
+}
+static void replay_fixup(void) {
+    if (!snap_fix) return;
+    memcpy(sel_want, snap_fix_want, sizeof sel_want); memcpy(sel_char, snap_fix_char, sizeof sel_char);
+    stash_on = 0; memset(stash_ldr, 0, sizeof stash_ldr); stash_naz = 0;
+    sel_fixup(&snap_fix_before, snap_fix_m);
+    white_rider_unasked();
 }
 /* The count the engine's move (leaf i) gives the unit an ARMY_SELECTION option names: its own split, on a copy. */
 static int sel_count(int i, const J *o) {
@@ -708,7 +929,9 @@ static int sel_count(int i, const J *o) {
  * could play one, its real hand could not): no card. 1 if applied. */
 static int opponent_no_card(void) {
     if (!leaves_ensure() || depth != 0) return 0;
-    /* a Fellowship phase the referee did not ask (nothing to do there, by its rules): done, for either side */
+    /* a Fellowship phase the referee did not ask (nothing to do there, by its rules): done, for either side; not while
+       our own card's answers are followed (the engine ran ahead: the referee has not got there yet) */
+    if ((R.s.dkind == D_FSP_DECLARE || R.s.dkind == D_GUIDE || R.s.dkind == D_ENTER_MORDOR) && (following_own_card || !referee_at_fsp_phase())) return 0;
     if (R.s.dkind == D_FSP_DECLARE || R.s.dkind == D_GUIDE || R.s.dkind == D_ENTER_MORDOR) {
         for (int i = 0; i < nl; i++) if (alive[i] && L[i].nstep && strstr(L[i].st[0].text, "\"kind\":\"done\"")) { VLOG("  a Fellowship phase the referee did not ask: done"); apply_leaf(i); return 1; }
         return 0;
@@ -736,6 +959,45 @@ static void discard_direct(int side, const J *opt) {
     s->card_where[c] = W_DISCARD; s->hand_n[side]--;
     VLOG("  a discard the copy did not expect: %s", CARD_KEY[c]);
 }
+/* Many Kings to the Service of Mordor, Pits of Mordor: CWOTR asks the next region with the Regulars run out (it recruits
+ * none there); the referee ends the card. Such a question is answered with any region (it changes nothing). 1 if applied. */
+static int spent_recruit(void) {
+    if (!leaves_ensure() || depth != 0 || R.s.dkind != D_CARD_REGION) return 0;
+    int c = card_asking(&R.s), n = c == CARD_PITS_OF_MORDOR ? SAURON : c == CARD_MANY_KINGS_TO_THE_SERVICE_OF_MORDOR ? SOUTHRON : -1;
+    if (n < 0 || R.s.pool_reg[n] > 0 || first_alive() < 0) return 0;
+    VLOG("  %s: no Regulars left, the region asked changes nothing", CARD[c].name);
+    apply_leaf(first_alive());
+    return 1;
+}
+/* The Guide's ability declined before the engine asks it: the referee asks the rest of a Hunt's damage before the
+ * separation of a Hobbit Guide taken as its casualty, CWOTR after it. Once the engine gets there: no ability (the damage
+ * is Corruption, the one answer left). 1 if applied. */
+static int guide_skip_settle(void) {
+    if (!guide_skip_pending || !leaves_ensure() || depth != 0 || R.s.dkind != D_HUNT_RESPONSE) return 0;
+    guide_skip_pending = 0;
+    int pick = -1;
+    for (int i = 0; i < nl; i++) if (alive[i] && L[i].nstep && strstr(L[i].st[0].text, "\"kind\":\"guide_ability\"")) alive[i] = 0;
+    for (int i = 0; i < nl && pick < 0; i++) if (alive[i] && L[i].nstep && strstr(L[i].st[0].text, "\"kind\":\"corruption\"")) pick = i;
+    for (int i = 0; i < nl; i++) if (alive[i] && i != pick) return 0;          /* another answer left: the referee's choice comes */
+    if (pick < 0) return 0;
+    VLOG("  the Guide's ability declined before: the Hunt's damage is Corruption");
+    apply_leaf(pick);
+    return 1;
+}
+/* A second Army move, recruit or Nazgul flight the engine asks but the referee does not (by its rules nothing more may
+ * move: The Ringwraiths Are Abroad's second Army), and the referee is on to another question: the move ends there.
+ * 1 if applied. */
+static int unasked_end(const char *decision) {
+    static const char *const same[] = { "ARMY_MOVE", "ARMY_SELECTION", "RECRUIT", "MOVE_MINIONS", "LEADER_REROLL" };
+    if (!decision) return 0;
+    for (size_t k = 0; k < sizeof same / sizeof *same; k++) if (!strcmp(decision, same[k])) return 0;
+    if (!leaves_ensure() || depth != 0 || !(R.s.dkind == D_ARMY_MOVE2 || R.s.dkind == D_MUSTER2 || R.s.dkind == D_NAZ_MOVE)) return 0;
+    for (int i = 0; i < nl; i++) if (alive[i] && L[i].nstep == 1 && strstr(L[i].st[0].text, "\"kind\":\"end\"")) {
+        VLOG("  %s's move the referee did not ask (it is at %s): ended", SIDE_KEY[R.s.dplayer], decision);
+        apply_leaf(i); return 1;
+    }
+    return 0;
+}
 /* Follows one answered decision. look: the events after it (for a hidden Combat card shown later). */
 /* a question that comes after the round's Combat cards (the referee is past them) */
 static int after_cards(const char *k) {
@@ -743,6 +1005,34 @@ static int after_cards(const char *k) {
                                          "FELLOWSHIP_PHASE", "DISCARD_EXCESS_CARD", "MOVE_COMPANIONS", "MOVE_MINIONS", "ARMY_MOVE", "RECRUIT" };
     for (size_t i = 0; k && i < sizeof after / sizeof *after; i++) if (!strcmp(k, after[i])) return 1;
     return 0;
+}
+/* A card's "Eliminate which figure?" (Stormcrow: the Free Peoples choose, "region:TYPE"): CWOTR eliminates one itself
+ * (a Leader first, else a Regular of the largest Army); the referee's figure replaces the engine's (snap: before the card). */
+static int is_figure_answer(const J *opt) {
+    const char *a = j_str(opt, "answer");
+    return a && strchr(a, ':') && j_str(opt, "region") && j_str(opt, "unit") && !j_str(opt, "nation");
+}
+static uint8_t *figure_cell(State *s, int r, int n, const char *u) {
+    return !strcmp(u, "regular") ? &s->reg[r][n] : !strcmp(u, "elite") ? &s->eli[r][n] : !strcmp(u, "leader") && n < NFPNAT ? &s->ldr[r][n] : NULL;
+}
+static void card_figure_settle(const J *opt) {
+    if (!snap_ok) return;
+    State *s = &R.s;
+    int r = region_of(j_str(opt, "region")); const char *u = j_str(opt, "unit");
+    if (r < 0) return;
+    static const char *const kinds[3] = { "regular", "elite", "leader" };
+    for (int n = 0; n < NFPNAT; n++) for (int r0 = 0; r0 < NREG; r0++) for (int k = 0; k < 3; k++) {
+        uint8_t *now = figure_cell(s, r0, n, kinds[k]), *was = figure_cell(&snap, r0, n, kinds[k]);
+        if (!now || !was || *now >= *was) continue;
+        if (r0 == r && !strcmp(kinds[k], u)) return;               /* the same figure */
+        uint8_t *to = figure_cell(s, r, n, u);
+        if (!to || !*to) continue;
+        (*now)++; (*to)--;
+        if (k < 2) { if (k == 0) s->pool_reg[n]--; else s->pool_eli[n]--; }
+        if (!strcmp(u, "regular")) s->pool_reg[n]++; else if (!strcmp(u, "elite")) s->pool_eli[n]++;
+        VLOG("  a card's figure eliminated as the referee did: %s %s in %s (the engine's: %s in %s)", NATION_KEY[n], u, REGION_KEY[r], kinds[k], REGION_KEY[r0]);
+        return;
+    }
 }
 static int follow_choice_(const J *e, int look);
 static int follow_choice(const J *e, int look) { following = 1; int r = follow_choice_(e, look); following = 0; return r; }
@@ -753,6 +1043,8 @@ static int follow_choice_(const J *e, int look) {
     const J *opt = j_get(e, "option");
     int side = side_of(side_key);
     if (!opt || side < 0) return 0;
+    following_own_card = side == me && decision && (!strcmp(decision, "CARD_CHOICE") || !strcmp(decision, "ARMY_SELECTION"));
+    if (!(decision && !strcmp(decision, "LEADER_REROLL"))) settle_reroll();
     int ev_face = -1, ev_ring_to = -1;
     if (decision && !strcmp(decision, "ACTION")) {
         const char *fk = j_str(opt, "face"), *kk = j_str(opt, "kind"), *tk = j_str(opt, "to");
@@ -781,12 +1073,63 @@ static int follow_choice_(const J *e, int look) {
         }
         if (real_opt) opt = real_opt;
     }
+    /* "The Ents Awake" (Treebeard, Huorns, Entmoot): a further Character card declined where CWOTR asks none (its card
+       ends there) */
+    int ents = card_of(j_str(opt, "card"));
+    ents = ents == CARD_THE_ENTS_AWAKE_TREEBEARD || ents == CARD_THE_ENTS_AWAKE_HUORNS || ents == CARD_THE_ENTS_AWAKE_ENTMOOT;
+    if (decision && !strcmp(decision, "CARD_CHOICE") && ents &&
+        j_get(opt, "skip") && !(leaves_ensure() && R.s.dplayer == side && R.s.dkind != D_ACTION && depth >= 0 && first_alive() >= 0 &&
+                                !leaf_done(first_alive()) && strstr(L[first_alive()].st[depth].text, "card_choice"))) goto done;
+    /* a card's Army move of ours: where it goes, for the units' question after it */
+    if (decision && !strcmp(decision, "CARD_CHOICE") && side == me) {
+        const char *to = j_str(opt, "to") ? j_str(opt, "to") : j_str(opt, "region");
+        if (to && region_of(to) >= 0) card_move_to = region_of(to);
+    }
+    if (decision && !strcmp(decision, "ACTION") && side == me) card_move_to = -1;
+    /* a card's "How many Regulars in <region>?" (the referee's only): CWOTR fills the regions itself, no step */
+    if (decision && !strcmp(decision, "CARD_CHOICE") && j_get(opt, "count") && !j_get(opt, "region") && j_str(opt, "card") &&
+        (!strcmp(j_str(opt, "card"), "sh-strat-17") || !strcmp(j_str(opt, "card"), "sh-strat-24"))) goto done;
+    /* the official rules' Leader re-roll ("both players can re-roll"): CWOTR always re-rolls, without a question; the
+     * referee's dice that follow are the re-roll's (a side that declines rolls none: the engine's copy differs then) */
+    if (decision && !strcmp(decision, "LEADER_REROLL")) {
+        const char *answer = j_str(opt, "answer");
+        if (answer && strcmp(answer, "reroll")) LOSE("%s declined its Leader re-roll (CWOTR always re-rolls)", side_key);
+        else replay_for_reroll();
+        goto done;
+    }
+    /* "continue" where the engine does not ask (a card's battle that may not be ceased: Corsairs of Umbar): nothing to follow */
+    if (decision && !strcmp(decision, "CEASE_ATTACK") && j_str(opt, "kind") && !strcmp(j_str(opt, "kind"), "continue") &&
+        !(leaves_ensure() && R.s.dplayer == side && R.s.dkind == D_CONTINUE)) { VLOG("  the battle goes on (the engine asks no cease here)"); goto done; }
     /* the new Guide on a tie: CWOTR picks one itself; the referee's answer is the one played */
     if (decision && !strcmp(decision, "CHOOSE_GUIDE")) {
         int c = char_of(j_str(opt, "character"));
         if (c == CH_GANDALF_WHITE) c = C_GANDALF; else if (c == CH_ARAGORN) c = C_STRIDER; else if (c == CH_GOLLUM) c = GOLLUM;
         if (c >= 0 && c <= GOLLUM && (c == GOLLUM || R.s.comp_loc[c] == LOC_FSP)) { R.s.guide = (uint8_t)c; leaves_reset(); }
         goto done;
+    }
+    /* a card's Nation that CWOTR chose itself (it offers only the Nations the card changes: Wisdom of Elrond with one
+       Nation not at war), the referee offering every one: settled; another Nation than the engine's is played instead */
+    if (decision && !strcmp(decision, "CARD_CHOICE") && j_str(opt, "nation") && !j_str(opt, "region") &&
+        !(leaves_ensure() && R.s.dplayer == side && R.s.dkind == D_CARD_NATION)) {
+        int want = nation_of(j_str(opt, "nation")), c = card_of(j_str(opt, "card")), k = -1;
+        if (snap_ok && c == CARD_WISDOM_OF_ELROND && want >= 0 && want < NFPNAT) {
+            for (int n = 0; n < NFPNAT && k < 0; n++) if (snap.pol[n] != R.s.pol[n] || snap.active[n] != R.s.active[n]) k = n;
+            if (k >= 0 && k != want) {
+                R.s.pol[k] = snap.pol[k]; R.s.active[k] = snap.active[k];
+                activate(&R.s, want); advance_pol(&R.s, want, 0);
+                VLOG("  %s: %s as the referee chose (the engine's: %s)", CARD[c].name, NATION_KEY[want], NATION_KEY[k]);
+            }
+        }
+        VLOG("  a card's Nation the engine chose itself: settled"); goto done;
+    }
+    if (decision && !strcmp(decision, "CARD_CHOICE") && is_figure_answer(opt) &&
+        !(leaves_ensure() && R.s.dplayer == side && R.s.dkind >= D_CARD_REGION)) { card_figure_settle(opt); goto done; }
+    /* the way a card's Army move just made goes ("Which way?", asked right after the move: its path, "via>to" or the
+       destination alone): CWOTR moves it at once */
+    int was_route_pending = route_pending; route_pending = 0;
+    if (decision && !strcmp(decision, "CARD_CHOICE") && R.s.reloc_on && was_route_pending && j_str(opt, "answer")) {
+        const char *a = j_str(opt, "answer"), *last = strrchr(a, '>');
+        if (region_of(last ? last + 1 : a) == R.s.reloc_to) { VLOG("  the way of a card's move: settled"); goto done; }
     }
     /* a card's Army move, "from>to" in one answer: CWOTR asks the Army (its region), then where it goes */
     if (decision && !strcmp(decision, "CARD_CHOICE") && j_str(opt, "from") && j_str(opt, "to") && strcmp(j_str(opt, "kind") ? j_str(opt, "kind") : "", "move_companion")) {
@@ -802,6 +1145,7 @@ static int follow_choice_(const J *e, int look) {
             if (want == to) break;
         }
         if (!used) VLOG("  a card's route or move the engine made already: %s>%s", j_str(opt, "from"), j_str(opt, "to"));
+        route_pending = 1;
         goto done;
     }
     /* a card's question about a move the engine made already (the route of a card move: "Which way?") */
@@ -825,6 +1169,11 @@ static int follow_choice_(const J *e, int look) {
     if (decision && !strcmp(decision, "CHOOSE_ATTACK") && R.s.b.active && depth <= 0 && region_of(j_str(opt, "to")) == R.s.b.dst) { VLOG("  the card's battle has begun in the engine"); goto done; }
     if (selmode && !(decision && !strcmp(decision, "ARMY_SELECTION"))) sel_finalize();
     if (decision && !strcmp(decision, "ARMY_SELECTION") && j_str(opt, "kind") && !strcmp(j_str(opt, "kind"), "count")) {
+        /* the units of a card's whole-Army move (CWOTR moved them all, the engine may be at the next Action): the
+           referee's army_moved that follows says what went */
+        if (!selmode && R.s.reloc_on) { VLOG("  a card's Army move: its units come with army_moved"); goto done; }
+        /* a partial advance whose selection the copy dropped (a move applied since): army_moved settles it too */
+        if (!selmode && adv_on) { VLOG("  the advance's units come with army_moved"); goto done; }
         if (!selmode) {
             int any = 0;
             if (leaves_ensure() && R.s.dplayer == side) for (int i = 0; i < nl; i++) if (alive[i] && (L[i].mv[0].type == M_ARMY || L[i].mv[0].type == M_ATTACK)) any = 1;
@@ -850,6 +1199,7 @@ static int follow_choice_(const J *e, int look) {
     if (decision && !strcmp(decision, "GUIDE_ABILITY") && leaves_ensure()) {
         const char *k = j_str(opt, "kind");
         if (k && !strcmp(k, "skip")) {
+            if (!(R.s.dkind == D_HUNT_RESPONSE && R.s.dplayer == side)) guide_skip_pending = 1;
             for (int i = 0; i < nl; i++) if (alive[i] && !leaf_done(i) && strstr(L[i].st[depth].text, "guide_ability")) alive[i] = 0;
             goto done;
         }
@@ -880,6 +1230,10 @@ static int follow_choice_(const J *e, int look) {
         }
         if (!(leaves_ensure() && R.s.dplayer == side && R.s.dkind == D_COMP_MOVE)) goto done;
     }
+    /* a separation CWOTR made without asking (one way to do it: I Will Go Alone with one Companion left), which the
+       referee asks anyway: the engine is past it */
+    if (decision && !strcmp(decision, "SEPARATE_COMPANIONS") && leaves_ensure() && (R.s.dplayer != side || (R.s.dkind == D_ACTION && depth == 0)))
+        { VLOG("  a separation the engine made already"); goto done; }
     /* the Companions of a separation, one at a time in the player's order: the engine's steps (in its own order) are
        reordered to the referee's (a group is a set) */
     if (decision && !strcmp(decision, "SEPARATE_COMPANIONS") && j_str(opt, "character") && leaves_ensure() && R.s.dplayer == side && depth >= 0) {
@@ -890,9 +1244,16 @@ static int follow_choice_(const J *e, int look) {
                 if (strstr(L[i].st[j].text, want)) { Step t = L[i].st[depth]; L[i].st[depth] = L[i].st[j]; L[i].st[j] = t; break; }
         }
     }
+    if (decision && !strcmp(decision, "JOIN_GROUP") && leaves_ensure() && R.s.dplayer == side) join_order(j_str(opt, "character"));
+    if (decision && !strcmp(decision, "MOVE_COMPANIONS") && leaves_ensure() && R.s.dplayer == side && R.s.dkind == D_COMP_MOVE) comp_lead(j_str(opt, "character"));
+    if (decision && !strcmp(decision, "CARD_CHOICE") && card_of(j_str(opt, "card")) == CARD_THE_BREAKING_OF_THE_FELLOWSHIP && leaves_ensure() && R.s.dplayer == side) {
+        char same[64]; snprintf(same, sizeof same, "\"card\":\"%s\"", CARD_KEY[CARD_THE_BREAKING_OF_THE_FELLOWSHIP]);
+        set_order(j_str(opt, "character"), same);
+    }
     int forced = 0;
     for (int guard = 0; guard < 40; guard++) {
         if (!leaves_ensure()) { VLOG("  no decision in the engine for %s %s", side_key, decision); st.ignored++; break; }
+        if (spent_recruit() || guide_skip_settle() || unasked_end(decision)) continue;
         /* the engine asks a Combat card the referee never asked (by its reading the side had none to play), and the
            referee is already further (any other question): none */
         if (R.s.dkind == D_BATTLE_CARD && depth <= 0 && after_cards(decision) && forced < 4) {
@@ -921,6 +1282,9 @@ static int follow_choice_(const J *e, int look) {
                     apply_leaf(pick); continue;
                 }
             }
+            /* a card's question that the referee asks before a separation's destination, CWOTR after it (Worn with
+               Sorrow and Toil after a Hobbit lost to the Hunt): it waits for the separation */
+            if (decision && !strcmp(decision, "CARD_CHOICE") && R.s.dkind == D_SEP_DEST) { VLOG("  %s's card answer waits for the separation", side_key); deferred = 1; break; }
             /* both sides over the hand limit: the referee asks the Shadow first, CWOTR the Free Peoples: wait for it */
             if (decision && !strcmp(decision, "DISCARD_EXCESS_CARD") && R.s.dkind == D_DISCARD) { VLOG("  %s's discard waits for the engine", side_key); deferred = 1; break; }
             /* a discard the copy did not expect (its count of that hand was off): made in the copy as it is */
@@ -947,6 +1311,9 @@ static int follow_choice_(const J *e, int look) {
             for (int i = 0; i < nl; i++) {
                 if (!alive[i]) continue;
                 int sc = leaf_done(i) ? -1 : hid ? hidden_match(&L[i].st[depth], opt) : step_match(&L[i].st[depth], opt);
+                /* our own planned move, answered as far as the referee's options allow (an attack with "all":false
+                   offered only): it stays the move followed */
+                if (i == target && side == me && sc >= 0 && sc < best) continue;
                 if (sc != best) { if (i == target) VLOG("  target dropped at step %d: score %d < %d: %s", depth, sc, best, leaf_done(i) ? "-" : L[i].st[depth].text); alive[i] = 0; continue; }
                 if (hid) { if (!chosen) chosen = L[i].st[depth].text; else if (strcmp(chosen, L[i].st[depth].text)) alive[i] = 0; }
             }
@@ -1051,6 +1418,30 @@ static int view_int(const J *o, const char *key);
 static void army_moved(const J *x) {
     State *s = &R.s;
     int from = region_of(j_str(x, "from")), to = region_of(j_str(x, "to"));
+    /* a partial advance (applied whole, its split pending): the pieces that went are the split */
+    if (adv_on && from == adv_src && to == adv_dst && side_of(j_str(x, "side")) >= 0) {
+        int side = side_of(j_str(x, "side")), lo = side == FP ? 0 : NFPNAT, hi = side == FP ? NFPNAT : NNAT;
+        for (int n = lo; n < hi; n++) { sel_want[n][0] = sel_want[n][1] = 0; if (n < NFPNAT) sel_want[n][2] = 0; }
+        if (side == SH) sel_want[SAURON][3] = 0;
+        const J *pieces = j_get(x, "pieces");
+        for (const J *p = pieces ? pieces->child : NULL; p; p = p->next) {
+            int n = nation_of(j_str(p, "nation")); const char *u = j_str(p, "unit"); int k = view_int(p, "count");
+            int uk = !u ? -1 : !strcmp(u, "regular") ? 0 : !strcmp(u, "elite") ? 1 : !strcmp(u, "leader") ? 2 : !strcmp(u, "nazgul") ? 3 : -1;
+            if (n >= 0 && uk >= 0) sel_want[n][uk] = k;
+        }
+        Move m; memset(&m, 0, sizeof m); m.type = M_ARMY; m.a = (uint8_t)adv_src; m.b = (uint8_t)adv_dst;
+        sel_fixup(&adv_before, m);
+        adv_on = 0; selmode = 0;
+        VLOG("  the advance as the referee made it: %s -> %s", REGION_KEY[from], REGION_KEY[to]);
+        return;
+    }
+    /* an advance the referee made without asking (Corsairs of Umbar: the Army must move in): the engine's advance, all */
+    if (!lost && leaves_ensure() && s->dkind == D_ADVANCE && s->b.active && s->b.src == from && s->b.dst == to && depth == 0) {
+        for (int i = 0; i < nl; i++) if (alive[i] && L[i].nstep && strstr(L[i].st[0].text, "\"kind\":\"advance\",\"all\":true")) {
+            VLOG("  an advance the referee made by itself: the engine's");
+            apply_leaf(i); return;
+        }
+    }
     if (!s->reloc_on || from != s->reloc_from || to != s->reloc_to) return;
     s->reloc_on = 0;
     int reg[NNAT] = {0}, eli[NNAT] = {0}, ldr[NFPNAT] = {0}, naz = 0;
@@ -1071,6 +1462,15 @@ static void army_moved(const J *x) {
     }
     int back = s->reloc_naz - naz; if (back > 0 && s->naz[to] >= back) { s->naz[to] -= (uint8_t)back; s->naz[from] += (uint8_t)back; }
     VLOG("  a card's move as the referee made it: %s -> %s", REGION_KEY[from], REGION_KEY[to]);
+}
+/* The battle is over at the referee while the engine asks the besieger to extend the siege battle (the referee does not
+ * offer to reduce the Army's last Elite with no Regular to replace it): the siege battle ends. */
+static void battle_ended(void) {
+    if (!leaves_ensure() || depth != 0 || R.s.dkind != D_SIEGE_EXTEND) return;
+    for (int i = 0; i < nl; i++) if (alive[i] && L[i].nstep && strstr(L[i].st[0].text, "\"kind\":\"stop\"")) {
+        VLOG("  the siege battle ends (the referee did not ask to extend it)");
+        apply_leaf(i); return;
+    }
 }
 /* ---- the pending events, at a decision or the game's end ---- */
 static void start_game(void) {
@@ -1137,11 +1537,14 @@ static void process_events(void) {
             int any = 0; for (int r = 0; r < NREG; r++) any |= voice_seen[r];
             if (any) voice_settle();
         }
+        if (kind && !strcmp(kind, "turn_started")) { ref_turn = view_int(x, "turn"); ref_phase = -1; }
+        if (kind && !strcmp(kind, "phase_started")) ref_phase = phase_index(j_str(x, "phase"));
         if (kind && !strcmp(kind, "choice")) {
             if (follow_choice(x, k + 1)) { if (ndefer < MAXDEF) defer[ndefer++] = strdup(ev[k]); }
             else retry_deferred();
         }
         else if (kind && !lost && !strcmp(kind, "army_moved")) army_moved(x);
+        else if (kind && !lost && !strcmp(kind, "battle_ended")) battle_ended();
         else if (kind && voice_pending && !strcmp(kind, "figure_recruited") && nation_of(j_str(x, "nation")) == ISENGARD) {
             int r = region_of(j_str(x, "region")); if (r >= 0) voice_seen[r]++;
         }
@@ -1162,11 +1565,14 @@ static void process_events(void) {
     }
     nev = 0;
     voice_settle();
-    /* drop what has been used */
-    int w = 0;
-    for (int i = 0; i < nrq; i++) if (!rq[i].used) rq[w++] = rq[i];
-    nrq = w;
-    snap_ok = 0;
+    /* drop what has been used; not while a move waits for the Leader re-roll's dice: it is played again from its
+       snapshot, with the queue as it was then */
+    if (!reroll_wait) {
+        int w = 0;
+        for (int i = 0; i < nrq; i++) if (!rq[i].used) rq[w++] = rq[i];
+        nrq = w;
+        snap_ok = 0;
+    }
 }
 
 /* ================= the view: compare, rebuild ================= */
@@ -1430,6 +1836,7 @@ static int resync(const J *v, int pov) {
     s->winner = 0;
     if (wotr_check(s, err, sizeof err)) { LOG("resync: the position fails the engine's check: %s", err); return 1; }
     leaves_reset(); rq_clear(); nlate = 0; adv_on = 0; stash_on = 0; memset(stash_ldr, 0, sizeof stash_ldr); stash_naz = 0;
+    reroll_wait = reroll_missing = 0; snap_ok = snap_fix = 0;       /* a move waiting for re-roll dice: replaced by the view */
     while (ndefer) free(defer[--ndefer]);
     started = 1; lost = 0; st.resyncs++; last_note[0] = 0; diverged = 0;
     return 0;
@@ -1523,15 +1930,103 @@ static int discard_ahead(const J *opts) {
     for (const J *o = opts->child; o; o = o->next) { const char *card = j_str(o, "card"); if (card && !strcmp(card, CARD_KEY[m.a])) { VLOG("our discard planned ahead: %s", CARD_KEY[m.a]); return (int)j_get(o, "o")->num; } }
     return -1;
 }
+/* Our card question that the referee asks before the opponent's separation destination (CWOTR asks it after): the
+ * separation stands in on a copy, CWOTR answers ours there. */
+static int answer_ahead(const J *opts) {
+    if (!leaves_ensure() || R.s.dkind != D_SEP_DEST || R.s.dplayer == me) return -1;
+    State t = R.s; Move mv[MAXMOVES];
+    wotr_prune = 0; int n = wotr_moves(&t, mv); if (n) wotr_apply(&t, mv[0]); wotr_prune = 1;
+    if (!n || t.winner || t.dplayer != me || t.dkind != D_CARD_OPTION || !t.qtag) return -1;
+    State c = t; float bv; int k;
+    wotr_determinize(&c, me, own_rng += 0x1234567);
+    Move m = agent_choose(&ag, &c, &bv, &k);
+    Leaf tmp; memset(&tmp, 0, sizeof tmp);
+    qtag_step(&tmp, &t, m.a);
+    int best = -1, bo = -1;
+    for (const J *o = opts->child; o && tmp.nstep; o = o->next) { int sc = step_match(&tmp.st[0], o); if (sc > best) { best = sc; bo = (int)j_get(o, "o")->num; } }
+    if (bo >= 0) VLOG("our card answer planned ahead of the opponent's separation: %s", tmp.st[0].text);
+    return bo;
+}
 /* The option to answer, or -1. */
+/* A card's "How many Regulars in <region>?" (its options counts): asked by the referee only, CWOTR fills the regions. */
+static int recruit_count_question(const J *decision) {
+    const J *ctx = j_get(decision, "context");
+    const char *q = ctx ? j_str(ctx, "question") : NULL;
+    return q && !strncmp(q, "How many Regulars in ", 21);
+}
 static int answer(const J *decision, const J *view) {
     const J *opts = j_get(decision, "options");
     int nopt = j_len(opts);
     const char *kind = j_str(decision, "kind");
     st.decisions++;
     if (selmode && !(kind && (!strcmp(kind, "ARMY_SELECTION") || !strcmp(kind, "SEPARATE_COMPANIONS")))) sel_finalize();
+    if (!(kind && !strcmp(kind, "LEADER_REROLL"))) settle_reroll();
+    if (view && view_int(view, "turn") > 0) { ref_turn = view_int(view, "turn"); ref_phase = phase_index(j_str(view, "phase")); }
     if (nopt <= 1) { st.asked_single++; return 0; }
     if (!started) start_game();
+    /* "How many Regulars in <region>?" (Many Kings to the Service of Mordor, Pits of Mordor: asked when the Regulars
+       run short, so that the most are recruited): CWOTR recruits two in each region while it can, without asking */
+    if (kind && !strcmp(kind, "CARD_CHOICE") && recruit_count_question(decision)) {
+        int best = -1, bc = -1;
+        for (const J *o = opts->child; o; o = o->next) { const J *c = j_get(o, "count"); if (c && c->num > bc) { bc = (int)c->num; best = (int)j_get(o, "o")->num; } }
+        if (best >= 0) { VLOG("  a card's recruit: as many Regulars as offered (%d)", bc); return best; }
+    }
+    /* the way a card's Army move goes ("Which way?"): CWOTR made the move already, its way changes nothing there */
+    if (kind && !strcmp(kind, "CARD_CHOICE")) {
+        const J *c = j_get(decision, "context");
+        const char *q = c ? j_str(c, "question") : NULL;
+        if (q && !strcmp(q, "Which way?") && R.s.reloc_on) { VLOG("  the way of a card's move: any"); return (int)j_get(opts->child, "o")->num; }
+    }
+    /* "The Ents Awake: Huorns": another Character card may be played at once; CWOTR offers no such play (its card ends):
+       declined, as the engine goes on */
+    if (kind && !strcmp(kind, "CARD_CHOICE")) {
+        const J *c = j_get(decision, "context");
+        const char *q = c ? j_str(c, "question") : NULL;
+        if (q && !strcmp(q, "Play another Character card?") && !(leaves_ensure() && R.s.dplayer == me && R.s.dkind != D_ACTION))
+            for (const J *o = opts->child; o; o = o->next) { const J *sk = j_get(o, "skip"); if (sk && sk->type == J_BOOL && sk->num) { VLOG("  Huorns: no further Character card (CWOTR offers none)"); return (int)j_get(o, "o")->num; } }
+    }
+    /* a card's Nation that CWOTR chose itself (it offered one): the Nation whose Political step the copy changed and the view not yet */
+    if (kind && !strcmp(kind, "CARD_CHOICE") && view && opts->child && j_str(opts->child, "nation") && !j_str(opts->child, "region") &&
+        !(leaves_ensure() && R.s.dplayer == me && R.s.dkind == D_CARD_NATION)) {
+        const J *pol = j_get(view, "politics");
+        for (const J *o = opts->child; o; o = o->next) {
+            int n = nation_of(j_str(o, "nation")); const J *p = pol ? j_get(pol, j_str(o, "nation")) : NULL;
+            if (n < 0 || !p) continue;
+            if (view_int(p, "step") != R.s.pol[n] || (n < NFPNAT && view_bool(p, "active") != (R.s.active[n] != 0))) { VLOG("  a card's Nation: the engine's"); return (int)j_get(o, "o")->num; }
+        }
+        VLOG("  a card's Nation: none changes in the engine, any");
+        return (int)j_get(opts->child, "o")->num;
+    }
+    /* a card's "Eliminate which figure?" that CWOTR answered itself: the figure the view has and the copy no longer has */
+    if (kind && !strcmp(kind, "CARD_CHOICE") && view && opts->child && is_figure_answer(opts->child) && !(leaves_ensure() && R.s.dplayer == me && R.s.dkind >= D_CARD_REGION)) {
+        int best = -1, bd = 0;
+        for (const J *o = opts->child; o; o = o->next) {
+            int r = region_of(j_str(o, "region")); const char *u = j_str(o, "unit");
+            if (r < 0 || !u) continue;
+            const J *regs = j_get(view, "regions"), *vr = regs ? j_get(regs, REGION_KEY[r]) : NULL;
+            int d = 0;
+            for (int n = 0; n < NFPNAT; n++) { uint8_t *c = figure_cell(&R.s, r, n, u); if (c) d += hb_view_count(vr ? j_get(vr, "units") : NULL, NATION_KEY[n], u) - *c; }
+            if (d > bd) { bd = d; best = (int)j_get(o, "o")->num; }
+        }
+        if (best >= 0) { VLOG("  a card's figure: the one CWOTR eliminated"); return best; }
+    }
+    /* a unit over the stacking limit (a card's Army move, say): CWOTR removed the excess itself (enforce_stacking) and
+       asks nothing; the units the view has and the copy no longer has are the ones it removed: one of them */
+    if (kind && !strcmp(kind, "REMOVE_EXCESS_UNIT") && view && !(leaves_ensure() && R.s.dplayer == me && R.s.dkind == D_CARD_OPTION && R.s.qtag == Q_EXCESS)) {
+        int best = -1, bd = 0;
+        for (const J *o = opts->child; o; o = o->next) {
+            int r = region_of(j_str(o, "region")), n = nation_of(j_str(o, "nation")); const char *u = j_str(o, "unit");
+            if (r < 0 || n < 0 || !u) continue;
+            const J *regs = j_get(view, "regions"), *vr = regs ? j_get(regs, REGION_KEY[r]) : NULL;
+            int el = !strcmp(u, "elite"), d = hb_view_count(vr ? j_get(vr, "units") : NULL, NATION_KEY[n], u) - (el ? R.s.eli[r][n] : R.s.reg[r][n]);
+            if (d > bd) { bd = d; best = (int)j_get(o, "o")->num; }
+        }
+        if (best >= 0) { VLOG("  an excess unit: the one CWOTR removed"); return best; }
+    }
+    /* the official rules' Leader re-roll: taken, as CWOTR always does (a re-roll can only add hits) */
+    if (kind && !strcmp(kind, "LEADER_REROLL")) {
+        for (const J *o = opts->child; o; o = o->next) if (j_str(o, "answer") && !strcmp(j_str(o, "answer"), "reroll")) return (int)j_get(o, "o")->num;
+    }
     if (kind && !strcmp(kind, "ACTION") && view && (depth <= 0 || lost)) {
         const char *why = lost ? "lost track" : (R.s.dkind != D_ACTION || R.s.dplayer != me || depth > 0) ? "the engine is elsewhere" : differs(view, me);
         if (why) {
@@ -1585,6 +2080,7 @@ static int answer(const J *decision, const J *view) {
        lead to the other) */
     for (int round = 0; round < 4; round++) {
         int moved = 0;
+        while (spent_recruit() || guide_skip_settle() || unasked_end(kind)) moved = 1;
         for (int g = 0; g < 6 && !(kind && !strcmp(kind, "FELLOWSHIP_PHASE")) && opponent_no_card(); g++) moved = 1;
         for (int guard = 0; guard < 10 && leaves_ensure() && R.s.dplayer != me; guard++) {
             int i = first_alive(), distinct = 1;
@@ -1640,8 +2136,22 @@ static int answer(const J *decision, const J *view) {
     if (kind && !strcmp(kind, "CARD_CHOICE") && R.s.reloc_on && opts->child && (j_str(opts->child, "region") || j_str(opts->child, "from")
             || (j_str(opts->child, "answer") && strchr(j_str(opts->child, "answer"), '>'))) &&
         !(leaves_ensure() && R.s.dplayer == me && (R.s.dkind == D_CARD_ARMY || R.s.dkind == D_CARD_REGION))) return (int)j_get(opts->child, "o")->num;
-    if (kind && !strcmp(kind, "ARMY_SELECTION") && !selmode && (!leaves_ensure() || R.s.dplayer != me || R.s.dkind != D_ACTION)) {
-        /* a card's Army move: the engine moved the units itself, all of them */
+    /* the units of a card's Army move CWOTR made itself (relocate_army, Rage of the Dunlendings): as many as it moved */
+    if (kind && !strcmp(kind, "ARMY_SELECTION") && !selmode && R.s.reloc_on && ctx && region_of(j_str(ctx, "from")) == R.s.reloc_from && region_of(j_str(ctx, "to")) == R.s.reloc_to) {
+        int best = -1, bd = 1 << 30;
+        for (const J *o = opts->child; o; o = o->next) {
+            int n = nation_of(j_str(o, "nation")); const char *u = j_str(o, "unit"); const J *c = j_get(o, "count");
+            if (!c) continue;
+            int want = 99;          /* a character: it goes */
+            if (n >= 0 && u) want = !strcmp(u, "regular") ? R.s.reloc_reg[n] : !strcmp(u, "elite") ? R.s.reloc_eli[n] : !strcmp(u, "leader") && n < NFPNAT ? R.s.reloc_ldr[n] : !strcmp(u, "nazgul") ? R.s.reloc_naz : 99;
+            int d = abs((int)c->num - want);
+            if (d < bd) { bd = d; best = (int)j_get(o, "o")->num; }
+        }
+        if (best >= 0) { VLOG("a card's Army move: as many as CWOTR moved"); return best; }
+    }
+    if (kind && !strcmp(kind, "ARMY_SELECTION") && (!selmode || sel_battle) && (!leaves_ensure() || R.s.dplayer != me || R.s.dkind != D_ACTION ||
+                                                                 (card_move_to >= 0 && ctx && region_of(j_str(ctx, "to")) == card_move_to))) {
+        /* a card's Army move (or a card's battle: its attackers): the engine moved the units itself, all of them */
         int best = -1, bc = -1;
         for (const J *o = opts->child; o; o = o->next) { const J *c = j_get(o, "count"); if (c && c->num > bc) { bc = (int)c->num; best = (int)j_get(o, "o")->num; } }
         if (best >= 0) { VLOG("a card's Army move: every unit goes"); return best; }
@@ -1652,6 +2162,7 @@ static int answer(const J *decision, const J *view) {
         for (const J *o = opts->child; o; o = o->next) { const J *c = j_get(o, "count"); if (c && c->num > bc) { bc = (int)c->num; best = (int)j_get(o, "o")->num; } }
         if (best >= 0) { VLOG("our advance: every unit goes"); return best; }
     }
+    if (kind && !strcmp(kind, "CARD_CHOICE")) { int o = answer_ahead(opts); if (o >= 0) return o; }
     if (!leaves_ensure() || R.s.dplayer != me) { VLOG("the engine has no decision of ours here"); LOSE("asked %s, the engine asks %s (%d) [%.60s]", kind, R.s.winner ? "nobody (over)" : SIDE_KEY[R.s.dplayer], R.s.dkind, j_str(decision, "prompt") ? j_str(decision, "prompt") : ""); return -1; }
     if (kind && !strcmp(kind, "ARMY_SELECTION") && target >= 0 && alive[target]) {
         int best = -1, bd = 1 << 30;
@@ -1670,6 +2181,7 @@ static int answer(const J *decision, const J *view) {
         int use = target >= 0 && !leaf_done(target) && strstr(L[target].st[depth].text, "guide_ability") != NULL;
         for (const J *o = opts->child; o; o = o->next) { const char *k = j_str(o, "kind"); if (k && !strcmp(k, use ? "use" : "skip")) return (int)j_get(o, "o")->num; }
     }
+    if (kind && !strcmp(kind, "JOIN_GROUP") && ctx) join_order(j_str(ctx, "character"));
     int planned = target;
     for (int tries = 0; tries < 2; tries++) {
         int best = -1, bo = -1;
@@ -1711,6 +2223,8 @@ static void new_game(const J *m) {
     snprintf(game_id, sizeof game_id, "%s", g ? g : "?");
     const J *ck = j_get(m, "clock"); const char *kind = ck ? j_str(ck, "kind") : NULL;
     clock_game = kind && !strcmp(kind, "game");
+    { const J *of = j_get(m, "official_rules"), *hp = j_get(m, "hidden_passes");
+      hidden_passes = of && of->type == J_BOOL && of->num && !(hp && hp->type == J_BOOL && !hp->num); }
     const J *sb = j_get(m, "seed_bot");
     own_rng = sb && sb->type == J_NUM ? (uint64_t)sb->num : (uint64_t)time(NULL);
     ag.rng = own_rng * 31 + 7;
@@ -1719,7 +2233,8 @@ static void new_game(const J *m) {
     else { ag.depth = 0; ag.width = 0; ag.dpol[FP] = ag.dpol[SH] = NULL; }
     if (time_share > 0) { ag.dpol[FP] = &player->pol[FP]; ag.dpol[SH] = &player->pol[SH]; }   /* the rollouts follow the move networks' first moves */
     memset(&R, 0, sizeof R); R.ext = -1;
-    started = 0; lost = 0; nev = 0; rq_clear(); leaves_reset(); nlate = 0; adv_on = 0; stash_on = 0; memset(stash_ldr, 0, sizeof stash_ldr); stash_naz = 0; diverged = 0; nrecent = 0;
+    reroll_wait = reroll_missing = reroll_misses = 0; snap_ok = snap_fix = 0; card_move_to = -1; route_pending = 0; voice_pending = 0;   /* nothing of the last game */
+    started = 0; lost = 0; nev = 0; guide_skip_pending = 0; ref_turn = 0; ref_phase = -1; rq_clear(); leaves_reset(); nlate = 0; adv_on = 0; stash_on = 0; memset(stash_ldr, 0, sizeof stash_ldr); stash_naz = 0; diverged = 0; nrecent = 0;
     while (ndefer) free(defer[--ndefer]);
     memset(&st, 0, sizeof st);
     LOG("%s: Hambot plays %s", game_id, side ? side : "?");

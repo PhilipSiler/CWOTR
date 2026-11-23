@@ -177,6 +177,9 @@ typedef struct State {
  * 0: every legal move the engine models -- used by rules tests and log replay. */
 extern int wotr_prune;
 extern int wotr_turn_cap;         /* the game stops as a draw after this many turns (30; the protocol bridge sets 200) */
+/* Ask every Combat card question, also of a side with no card to play ("no card" its only option): a referee that asks
+ * the passes on a hidden hand (the official rules' hidden_passes) is followed so. Off: such a side is not asked. */
+extern int wotr_ask_every_card;
 
 /* ---- public API ---- */
 void wotr_global_init(void);
