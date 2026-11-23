@@ -135,7 +135,7 @@ int wotr_check(const State *s, char *err, int n) {
     if (nz != 8) FAIL("nazgul count %d", nz);
     for (int c = 0; c < NCARD; c++) if (s->card_where[c] == W_HAND) hn[CARD_SIDE(c)]++;
     if (hn[0] != s->hand_n[0] || hn[1] != s->hand_n[1]) FAIL("hand count mismatch");
-    if (s->dkind == D_ACTION && (hn[0] > 6 || hn[1] > 6)) FAIL("hand over limit at action");
+    if (s->dkind == D_ACTION && (hn[0] > 6 || hn[1] > 6)) FAIL("hand over limit at action (FP %d, SH %d)", hn[0], hn[1]);
     if (s->corruption > 12 || s->progress > 12 || s->mordor > 5) FAIL("track overflow");
     for (int c = 0; c < NCOMP; c++) if (s->comp_loc[c] >= NREG && s->comp_loc[c] != LOC_FSP && s->comp_loc[c] != LOC_DEAD) FAIL("bad companion loc");
     int fc = fsp_comps(s);
@@ -247,3 +247,4 @@ int wotr_mid_turn(State *s, int side, uint64_t seed, char *err, int en) {
    0 any other die. */
 uint32_t (*wotr_rnd_hook)(struct State *s, uint32_t n, int kind);
 int wotr_rk_d6, wotr_draw_deck;
+int wotr_ma_pick = -1;

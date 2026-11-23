@@ -215,6 +215,8 @@ void pop(State *s);
 /* rng */
 extern uint32_t (*wotr_rnd_hook)(struct State *s, uint32_t n, int kind);
 extern int wotr_rk_d6, wotr_draw_deck;
+/* Mighty Attack's Companion when a player chose it (the official rules ask; -1: the one of the lowest Leadership) */
+extern int wotr_ma_pick;
 static inline uint32_t rnd_own(State *s, uint32_t n);
 static inline uint32_t rndk(State *s, uint32_t n, int kind) {
     if (wotr_rnd_hook && !s->rng_max) { s->nrand++; return wotr_rnd_hook(s, n, kind); }

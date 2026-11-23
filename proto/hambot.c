@@ -508,6 +508,16 @@ static void apply_leaf(int i) {
     leaves_reset();
 }
 static void replay_for_reroll(void);
+/* Mighty Attack's Companion (Axe and Bow, Horn of Gondor): the official rules ask which one forfeits his Leadership,
+ * before the Leader re-roll's dice; CWOTR's engine takes the one of the lowest Leadership unless told (wotr_ma_pick).
+ * The question does not end a wait for the re-roll's dice: the waiting move is played again with the Companion. */
+static int ma_question_card(const char *card) { int c = card_of(card); return c == CARD_AXE_AND_BOW || c == CARD_HORN_OF_GONDOR; }
+static int ma_comp_of(const char *answer) {
+    int c = answer ? char_of(answer) : -1;
+    if (c == 9) return C_STRIDER;           /* aragorn */
+    if (c == 8) return C_GANDALF;           /* gandalf-the-white */
+    return c >= 0 && c < NCOMP ? c : -1;
+}
 /* The referee has gone past the Leader re-roll (another question): the waiting move played again with the dice it sent,
  * and a re-roll it did not make (none for that side by its count) as dice that miss: no hits, as there. */
 static void settle_reroll(void) {
@@ -519,6 +529,7 @@ static void settle_reroll(void) {
     reroll_misses = 0;
     if (reroll_wait) { reroll_wait = 0; VLOG("  the Leader re-roll could not be played again"); }
     else VLOG("  the referee made no Leader re-roll here: none (its dice miss)");
+    wotr_ma_pick = -1;
 }
 /* The move that waited for the Leader re-roll's dice (reroll_wait), played again from its snapshot now that they may be
  * queued; it waits on if they are still missing (the other side has not answered yet). */
@@ -533,7 +544,7 @@ static void replay_for_reroll(void) {
     for (int k = 0; k < lf.nmv; k++) apply_followed(lf.mv[k]);
     replay_fixup();
     if (reroll_missing) reroll_wait = 1;
-    else VLOG("  played again with the Leader re-roll's dice");
+    else { VLOG("  played again with the Leader re-roll's dice"); wotr_ma_pick = -1; }
     leaves_reset();
 }
 static void voice_settle(void) {
@@ -1034,6 +1045,10 @@ static void card_figure_settle(const J *opt) {
         return;
     }
 }
+static int hunt_sep_hold, hunt_sep_dest = -1;
+/* The referee's Action dice by its numbering (its `die`), face only: rolled (action_dice_rolled), changed by an Elven
+ * Ring or The Lidless Eye. The Lidless Eye's question names a die by that number, CWOTR's engine a face. */
+static int8_t ref_face[2][16]; static int ref_nd[2];     /* a Hunt answer waiting for a separation's destination; that destination */
 static int follow_choice_(const J *e, int look);
 static int follow_choice(const J *e, int look) { following = 1; int r = follow_choice_(e, look); following = 0; return r; }
 static int follow_choice_(const J *e, int look) {
@@ -1044,12 +1059,37 @@ static int follow_choice_(const J *e, int look) {
     int side = side_of(side_key);
     if (!opt || side < 0) return 0;
     following_own_card = side == me && decision && (!strcmp(decision, "CARD_CHOICE") || !strcmp(decision, "ARMY_SELECTION"));
+    if (hunt_sep_hold && decision && !strcmp(decision, "SEPARATE_COMPANIONS") && j_str(opt, "kind") && !strcmp(j_str(opt, "kind"), "separate_to"))
+        hunt_sep_dest = region_of(j_str(opt, "to"));
+    int ma = decision && !strcmp(decision, "CARD_CHOICE") && ma_question_card(j_str(opt, "card")) && ma_comp_of(j_str(opt, "answer")) >= 0;
+    if (ma) {
+        wotr_ma_pick = ma_comp_of(j_str(opt, "answer"));
+        VLOG("  Mighty Attack: %s forfeits his Leadership", j_str(opt, "answer"));
+        if (reroll_wait) replay_for_reroll();
+        return 0;
+    }
     if (!(decision && !strcmp(decision, "LEADER_REROLL"))) settle_reroll();
+    /* The Lidless Eye: the referee's die (its number) as the face CWOTR's engine asks */
+    if (decision && !strcmp(decision, "CARD_CHOICE") && j_str(opt, "card") && card_of(j_str(opt, "card")) == CARD_THE_LIDLESS_EYE &&
+        R.s.dkind == D_CARD_OPTION && R.s.dplayer == SH && card_asking(&R.s) == CARD_THE_LIDLESS_EYE) {
+        const J *sk = j_get(opt, "skip"); const char *ans = j_str(opt, "answer");
+        int d = ans ? atoi(ans) : -1, face = sk && sk->type == J_BOOL && sk->num ? 255 : d >= 0 && d < ref_nd[SH] ? ref_face[SH][d] : -1;
+        Move mv[MAXMOVES]; int n = wotr_moves(&R.s, mv), k = -1;
+        for (int i = 0; i < n; i++) if (mv[i].type == M_CHOICE && mv[i].a == face) k = i;
+        if (k >= 0) {
+            VLOG("  The Lidless Eye: the referee's die %d (%s)", d, face == 255 ? "no more" : FACE_KEY[face]);
+            if (face != 255) ref_face[SH][d] = F_SPECIAL;
+            leaves_reset(); apply_followed(mv[k]); leaves_reset();
+            return 0;
+        }
+    }
     int ev_face = -1, ev_ring_to = -1;
     if (decision && !strcmp(decision, "ACTION")) {
         const char *fk = j_str(opt, "face"), *kk = j_str(opt, "kind"), *tk = j_str(opt, "to");
         ev_face = fk && kk && !strcmp(kk, "use_die") ? face_of(fk) : -1;
         ev_ring_to = tk && kk && !strcmp(kk, "elven_ring") ? face_of(tk) : -1;
+        { const J *dj = j_get(opt, "die"); int d = dj && dj->type == J_NUM ? (int)dj->num : -1;
+          if (ev_ring_to >= 0 && d >= 0 && d < ref_nd[side]) ref_face[side][d] = (int8_t)ev_ring_to; }
     }
     const J *hidden = j_get(opt, "hidden");
     /* the attacker's hidden Combat card: the card itself comes with combat_cards_revealed */
@@ -1285,6 +1325,12 @@ static int follow_choice_(const J *e, int look) {
             /* a card's question that the referee asks before a separation's destination, CWOTR after it (Worn with
                Sorrow and Toil after a Hobbit lost to the Hunt): it waits for the separation */
             if (decision && !strcmp(decision, "CARD_CHOICE") && R.s.dkind == D_SEP_DEST) { VLOG("  %s's card answer waits for the separation", side_key); deferred = 1; break; }
+            /* the rest of a Hunt's damage after a Hobbit Guide is separated (the next Hobbit's Guide ability, a
+               casualty): the referee asks it first and separates every Companion of that Hunt with one destination,
+               CWOTR asks each one's destination at once: it waits, and the destination is given to each in turn */
+            if (decision && (!strcmp(decision, "GUIDE_ABILITY") || !strcmp(decision, "HUNT_CASUALTY")) && R.s.dkind == D_SEP_DEST) {
+                VLOG("  %s's Hunt answer waits for the separation", side_key); hunt_sep_hold = 1; deferred = 1; break;
+            }
             /* both sides over the hand limit: the referee asks the Shadow first, CWOTR the Free Peoples: wait for it */
             if (decision && !strcmp(decision, "DISCARD_EXCESS_CARD") && R.s.dkind == D_DISCARD) { VLOG("  %s's discard waits for the engine", side_key); deferred = 1; break; }
             /* a discard the copy did not expect (its count of that hand was off): made in the copy as it is */
@@ -1363,6 +1409,10 @@ static int follow_choice_(const J *e, int look) {
                 if (all_done()) apply_leaf(first_alive());
                 continue;
             }
+        }
+        /* a Hunt answer after a Hobbit Guide is separated, the engine asking his destination first: it waits (above) */
+        if (decision && (!strcmp(decision, "GUIDE_ABILITY") || !strcmp(decision, "HUNT_CASUALTY")) && R.s.dkind == D_SEP_DEST) {
+            VLOG("  %s's Hunt answer waits for the separation", side_key); hunt_sep_hold = 1; deferred = 1; break;
         }
         /* no step agrees: a single-answer step the referee skipped, or a question the engine does not ask */
         int i = first_alive(), distinct = 1;
@@ -1491,9 +1541,19 @@ static void retry_deferred(void) {
             const J *x = m ? j_get(m, "event") : NULL;
             int still = x ? follow_choice(x, nev) : 0;
             if (m) free(mem);
-            if (!still) { free(defer[d]); memmove(&defer[d], &defer[d + 1], sizeof(char *) * (size_t)(ndefer - d - 1)); ndefer--; again = 1; break; }
+            if (!still) {
+                free(defer[d]); memmove(&defer[d], &defer[d + 1], sizeof(char *) * (size_t)(ndefer - d - 1)); ndefer--; again = 1;
+                /* a held Hunt answer separated another Companion: the referee's one destination for him too */
+                if (hunt_sep_dest >= 0 && !lost && R.s.dkind == D_SEP_DEST && R.s.dplayer == FP) {
+                    Move mv[MAXMOVES]; int n = wotr_moves(&R.s, mv), k = -1;
+                    for (int i = 0; i < n; i++) if (mv[i].a == hunt_sep_dest) k = i;
+                    if (k >= 0) { VLOG("  the separation's destination again: %s", REGION_KEY[hunt_sep_dest]); apply_followed(mv[k]); }
+                }
+                break;
+            }
         }
     }
+    if (!ndefer) { hunt_sep_hold = 0; hunt_sep_dest = -1; }
 }
 static void process_events(void) {
     for (int k = 0; k < nev; k++) {             /* every random outcome first: the engine takes them when it gets there */
@@ -1539,6 +1599,18 @@ static void process_events(void) {
         }
         if (kind && !strcmp(kind, "turn_started")) { ref_turn = view_int(x, "turn"); ref_phase = -1; }
         if (kind && !strcmp(kind, "phase_started")) ref_phase = phase_index(j_str(x, "phase"));
+        /* "Then, you may move or attack with an Army containing the Witch-king / a Nazgul" with no such Army: the
+           referee does not ask (one option); CWOTR asks "skip" / "move" still: the card ends there */
+        if (kind && !lost && started && (!strcmp(kind, "phase_started") || !strcmp(kind, "turn_started")) &&
+            R.s.dkind == D_CARD_OPTION && R.s.dplayer == SH && R.s.qtag == Q_BCC_ARMY) {
+            Move mv[MAXMOVES]; int n = wotr_moves(&R.s, mv), k0 = -1;
+            for (int i = 0; i < n; i++) if (mv[i].type == M_CHOICE && mv[i].a == 0) k0 = i;
+            if (k0 >= 0) { VLOG("  the card's Army move the referee did not ask (no such Army): none"); leaves_reset(); apply_followed(mv[k0]); leaves_reset(); }
+        }
+        if (kind && !strcmp(kind, "action_dice_rolled")) {
+            int sd = side_of(j_str(x, "side")); const J *fl = j_get(x, "faces");
+            if (sd >= 0) { ref_nd[sd] = 0; for (const J *f = fl ? fl->child : NULL; f && ref_nd[sd] < 16; f = f->next) ref_face[sd][ref_nd[sd]++] = (int8_t)(f->type == J_STR ? face_of(f->str) : -1); }
+        }
         if (kind && !strcmp(kind, "choice")) {
             if (follow_choice(x, k + 1)) { if (ndefer < MAXDEF) defer[ndefer++] = strdup(ev[k]); }
             else retry_deferred();
@@ -1960,6 +2032,16 @@ static int answer(const J *decision, const J *view) {
     const char *kind = j_str(decision, "kind");
     st.decisions++;
     if (selmode && !(kind && (!strcmp(kind, "ARMY_SELECTION") || !strcmp(kind, "SEPARATE_COMPANIONS")))) sel_finalize();
+    /* Mighty Attack's Companion: the one CWOTR's engine takes (the lowest Leadership), before the re-roll's dice */
+    if (kind && !strcmp(kind, "CARD_CHOICE") && opts && opts->child && ma_question_card(j_str(opts->child, "card"))) {
+        int best = -1, bl = 99;
+        for (const J *o = opts->child; o; o = o->next) {
+            int c = ma_comp_of(j_str(o, "answer"));
+            int l = c >= 0 ? comp_leadership(&R.s, c) : 99;
+            if (c >= 0 && l < bl) { bl = l; best = (int)j_get(o, "o")->num; }
+        }
+        if (best >= 0) { VLOG("  Mighty Attack: the Companion of the lowest Leadership"); return best; }
+    }
     if (!(kind && !strcmp(kind, "LEADER_REROLL"))) settle_reroll();
     if (view && view_int(view, "turn") > 0) { ref_turn = view_int(view, "turn"); ref_phase = phase_index(j_str(view, "phase")); }
     if (nopt <= 1) { st.asked_single++; return 0; }
@@ -2217,6 +2299,7 @@ static void send_choice(int id, int o, const char *fp) {
     else snprintf(msg, sizeof msg, "{\"type\":\"choice\",\"id\":%d,\"o\":%d}", id, o);
     send_line(msg);
 }
+static int start_at_phase(const J *sv, int ph);
 static void new_game(const J *m) {
     const char *side = j_str(m, "side"), *g = j_str(m, "game");
     me = side_of(side);
@@ -2233,11 +2316,50 @@ static void new_game(const J *m) {
     else { ag.depth = 0; ag.width = 0; ag.dpol[FP] = ag.dpol[SH] = NULL; }
     if (time_share > 0) { ag.dpol[FP] = &player->pol[FP]; ag.dpol[SH] = &player->pol[SH]; }   /* the rollouts follow the move networks' first moves */
     memset(&R, 0, sizeof R); R.ext = -1;
-    reroll_wait = reroll_missing = reroll_misses = 0; snap_ok = snap_fix = 0; card_move_to = -1; route_pending = 0; voice_pending = 0;   /* nothing of the last game */
+    reroll_wait = reroll_missing = reroll_misses = 0; wotr_ma_pick = -1; last_note[0] = 0; hunt_sep_hold = 0; hunt_sep_dest = -1; ref_nd[0] = ref_nd[1] = 0; snap_ok = snap_fix = 0; card_move_to = -1; route_pending = 0; voice_pending = 0;   /* nothing of the last game */
     started = 0; lost = 0; nev = 0; guide_skip_pending = 0; ref_turn = 0; ref_phase = -1; rq_clear(); leaves_reset(); nlate = 0; adv_on = 0; stash_on = 0; memset(stash_ldr, 0, sizeof stash_ldr); stash_naz = 0; diverged = 0; nrecent = 0;
     while (ndefer) free(defer[--ndefer]);
     memset(&st, 0, sizeof st);
     LOG("%s: Hambot plays %s", game_id, side ? side : "?");
+    /* A game from a position (a certification scenario, a suite entry): no setup to follow; new_game carries this
+       side's view of it, an Action of the side to act: the copy is built from it */
+    const J *sv = j_get(m, "view");
+    if (sv) {
+        int act = side_of(j_str(sv, "to_act"));
+        if (act < 0) act = me;
+        int ph = phase_index(j_str(sv, "phase"));
+        if (resync(sv, me)) LOG("%s: the start position could not be read", game_id);   /* our view: our cards known */
+        else if (ph == 1 || ph == 2) {
+            if (start_at_phase(sv, ph)) LOG("%s: the start position's %s could not be reached", game_id, j_str(sv, "phase"));
+            else { st.resyncs = 0; LOG("%s: from a position (new_game's view), at the %s", game_id, j_str(sv, "phase")); }
+        } else {
+            R.s.dplayer = (uint8_t)act; R.s.st[R.s.sp - 1].v[0] = (uint8_t)act;          /* the side to act's Action */
+            st.resyncs = 0; LOG("%s: from a position (new_game's view), %s to act", game_id, SIDE_KEY[act]);
+        }
+    }
+}
+/* A start position in the Fellowship phase (ph 1) or at the Hunt allocation (2): the copy (resync's, at an Action) is
+ * taken back to the end of the turn before and the turn begun in the engine (its own draws: the referee sends none,
+ * the view has them), the Fellowship phase's question answered "end" for the Hunt allocation; then the view's board,
+ * cards and Fellowship laid over it, the engine's questions kept. 0: the copy is there. */
+static int start_at_phase(const J *sv, int ph) {
+    char err[200];
+    State t = R.s;
+    if (t.turn < 2) wotr_init(&t, own_rng ^ 0x5eed);       /* turn 1: the game's own start (its Fellowship phase next) */
+    else if (wotr_begin_turn(&t, own_rng ^ 0x5eed, err, sizeof err)) { LOG("start: %s", err); return 1; }
+    int target = ph == 1 ? D_FSP_DECLARE : D_HUNT_ALLOC;
+    for (int guard = 0; guard < 16 && t.dkind != target && !t.winner; guard++) {
+        Move mv[MAXMOVES]; int n = wotr_moves(&t, mv), k = n > 0 ? 0 : -1;
+        if (t.dkind == D_FSP_DECLARE) { k = -1; for (int i = 0; i < n; i++) if (mv[i].a == 255) k = i; }
+        else if (t.dkind != D_DISCARD) { LOG("start: the engine asks %d before the phase", t.dkind); return 1; }
+        if (k < 0) { LOG("start: no move to go on"); return 1; }
+        wotr_apply(&t, mv[k]);
+    }
+    if (t.dkind != target) { LOG("start: the phase not reached (%d)", t.dkind); return 1; }
+    if (board_from_view(&t, sv, me, err, sizeof err)) { LOG("start: %s", err); return 1; }
+    if (wotr_check(&t, err, sizeof err)) { LOG("start: the position fails the engine's check: %s", err); return 1; }
+    R.s = t;
+    return 0;
 }
 static void game_over(const J *m) {
     const char *w = j_str(m, "winner"), *how = j_str(m, "how");
