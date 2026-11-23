@@ -2,6 +2,7 @@
 #include "wotr.h"
 
 int wotr_prune = 1;
+int wotr_ask_every_card = 0;
 int wotr_roads = 1;
 
 #define ANYDIE NFACE

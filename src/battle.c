@@ -319,7 +319,7 @@ void fr_round(State *s, Frame *f) {
             for (int c = side * 48; c < side * 48 + 48; c++) if (s->card_where[c] == W_HAND && cc_playable(s, side, c)) s->opt[s->nopt++] = (uint8_t)c;
             if (side == SH && s->card_where[CARD_BALROG_OF_MORIA] == W_TABLE && cc_playable(s, SH, CARD_BALROG_OF_MORIA)) s->opt[s->nopt++] = CARD_BALROG_OF_MORIA;
         }
-        if (s->nopt > 1) {
+        if (s->nopt > 1 || wotr_ask_every_card) {
             ASK(D_BATTLE_CARD, f->v[0] == 0 ? att : def);
             side = f->v[0] == 0 ? att : def;
             if (s->mv.a != 255) {
@@ -437,6 +437,7 @@ void fr_round(State *s, Frame *f) {
             if (has_cc(s, FP, CC_MIGHTY_ATTACK) && lead) {
                 int best = -1;
                 for (int c = 0; c < NCOMP; c++) if ((lead >> c) & 1 && (best < 0 || comp_leadership(s, c) < comp_leadership(s, best))) best = c;
+                if (wotr_ma_pick >= 0 && wotr_ma_pick < NCOMP && (lead >> wotr_ma_pick) & 1) best = wotr_ma_pick;   /* the player's choice */
                 flead -= comp_leadership(s, best);
                 if (fmiss > 0) { fmiss--; fh++; }
             }
