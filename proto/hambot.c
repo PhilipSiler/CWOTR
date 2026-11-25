@@ -1100,8 +1100,10 @@ static int follow_choice_(const J *e, int look) {
             const J *x = m ? j_get(m, "event") : NULL;
             const char *kk = x ? j_str(x, "kind") : NULL;
             if (kk && !strcmp(kk, "combat_cards_revealed")) {
-                const char *role = R.s.b.active && R.s.b.att == side ? "attacker_card" : "defender_card";
-                const char *card = j_str(x, role);
+                /* the side's own card of the two, by its key (the battle may not have begun in the copy yet: the attack
+                   in the same batch is applied after this; wotr #1431, a scenario's prefix) */
+                const char *own = side == SH ? "sh-" : "fp-", *ac = j_str(x, "attacker_card"), *dc = j_str(x, "defender_card");
+                const char *card = ac && !strncmp(ac, own, 3) ? ac : dc && !strncmp(dc, own, 3) ? dc : NULL;
                 if (!card) card = j_str(x, side == SH ? "shadow_card" : "free_peoples_card");
                 if (card) {
                     char buf[200]; snprintf(buf, sizeof buf, "{\"kind\":\"combat_card\",\"card\":\"%s\"}", card);
@@ -1129,11 +1131,16 @@ static int follow_choice_(const J *e, int look) {
     /* a card's "How many Regulars in <region>?" (the referee's only): CWOTR fills the regions itself, no step */
     if (decision && !strcmp(decision, "CARD_CHOICE") && j_get(opt, "count") && !j_get(opt, "region") && j_str(opt, "card") &&
         (!strcmp(j_str(opt, "card"), "sh-strat-17") || !strcmp(j_str(opt, "card"), "sh-strat-24"))) goto done;
+    /* Dead Men of Dunharrow's count (the official rules' "up to three"): CWOTR recruited as many as it could with the
+       card, no step; a smaller count is set right by the view at the next Action (wotr #1431) */
+    if (decision && !strcmp(decision, "CARD_CHOICE") && j_get(opt, "count") && j_str(opt, "card") && !strcmp(j_str(opt, "card"), "fp-char-22")) goto done;
     /* the official rules' Leader re-roll ("both players can re-roll"): CWOTR always re-rolls, without a question; the
-     * referee's dice that follow are the re-roll's (a side that declines rolls none: the engine's copy differs then) */
+     * referee's dice that follow are the re-roll's. A side that declines rolls none (a referee's prefix may decline ours
+     * in a scenario, wotr #1431): its failed dice stay failed, as a re-roll whose dice all miss, which is what
+     * settle_reroll plays once the referee goes past (reroll_misses). */
     if (decision && !strcmp(decision, "LEADER_REROLL")) {
         const char *answer = j_str(opt, "answer");
-        if (answer && strcmp(answer, "reroll")) LOSE("%s declined its Leader re-roll (CWOTR always re-rolls)", side_key);
+        if (answer && strcmp(answer, "reroll")) VLOG("  %s declines its Leader re-roll: its re-roll's dice miss", side_key);
         else replay_for_reroll();
         goto done;
     }
@@ -2024,7 +2031,9 @@ static int answer_ahead(const J *opts) {
 static int recruit_count_question(const J *decision) {
     const J *ctx = j_get(decision, "context");
     const char *q = ctx ? j_str(ctx, "question") : NULL;
-    return q && !strncmp(q, "How many Regulars in ", 21);
+    /* and Dead Men of Dunharrow's "How many Gondor Regulars to recruit?" (the official rules' "up to three"; CWOTR
+       recruits three, as many as the pool has, without asking; wotr #1431) */
+    return q && (!strncmp(q, "How many Regulars in ", 21) || !strcmp(q, "How many Gondor Regulars to recruit?"));
 }
 static int answer(const J *decision, const J *view) {
     const J *opts = j_get(decision, "options");
